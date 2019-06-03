@@ -139,7 +139,7 @@ static int get_local_pod_info(struct flb_kube *ctx)
 
 /* Gather metadata from API Server */
 static int get_api_server_info(struct flb_kube *ctx,
-                               const char *namespace, const char *podname,
+                               const char *namespace, const char *podname, const char *pod_uid,
                                char **out_buf, size_t *out_size)
 {
     int ret;
@@ -157,13 +157,17 @@ static int get_api_server_info(struct flb_kube *ctx,
      * If not, fall back to API. This is primarily for diagnostic purposes,
      * e.g. debugging new parsers.
      */
-    if (ctx->meta_preload_cache_dir && namespace && podname) {
+    if (ctx->meta_preload_cache_dir) {
         int fd;
         char *payload = NULL;
         size_t payload_size = 0;
         struct stat sb;
 
-        ret = snprintf(uri, sizeof(uri) - 1, "%s/%s-%s.meta", ctx->meta_preload_cache_dir, namespace, podname);
+        if (namespace && podname) {
+            ret = snprintf(uri, sizeof(uri) - 1, "%s/%s-%s.meta", ctx->meta_preload_cache_dir, namespace, podname);
+        } else if (pod_uid) {
+            ret = snprintf(uri, sizeof(uri) - 1, "%s/%s-%s.meta", ctx->meta_preload_cache_dir, pod_uid);            
+        }
         if (ret > 0) {
             fd = open(uri, O_RDONLY, 0);
             if (fd > 0) {
@@ -287,7 +291,12 @@ static void cb_results(const char *name, const char *value,
         meta->container_hash_len = vlen;
         meta->skip++;
     }
-
+    else if (meta->pod_uid == NULL &&
+             strcmp(name, "pod_uid") == 0) {
+        meta->pod_uid = flb_strndup(value, vlen);
+        meta->pod_uid_len = vlen;
+        meta->skip++;
+    }
     return;
 }
 
@@ -747,6 +756,19 @@ static inline int extract_meta(struct flb_kube *ctx,
         meta->cache_key[off] = '\0';
         meta->cache_key_len = off;
     }
+    else if (meta->pod_uid) {
+        n = meta->pod_uid_len + 1;
+        meta->cache_key = flb_malloc(n);
+        if (!meta->cache_key) {
+            flb_errno();
+            return -1;
+        }        
+        /* Copy pod_uid */
+        memcpy(meta->cache_key, meta->pod_uid, meta->pod_uid_len);
+        off = meta->pod_uid_len;
+        meta->cache_key[off] = '\0';
+        meta->cache_key_len = off;                
+    }
     else {
         meta->cache_key = NULL;
         meta->cache_key_len = 0;
@@ -769,7 +791,7 @@ static int get_and_merge_meta(struct flb_kube *ctx, struct flb_kube_meta *meta,
     size_t merge_size;
 
     ret = get_api_server_info(ctx,
-                              meta->namespace, meta->podname,
+                              meta->namespace, meta->podname, meta->pod_uid,
                               &api_buf, &api_size);
     if (ret == -1) {
         return -1;
@@ -855,7 +877,7 @@ int flb_kube_meta_init(struct flb_kube *ctx, struct flb_config *config)
 
     /* Gather info from API server */
     flb_info("[filter_kube] testing connectivity with API server...");
-    ret = get_api_server_info(ctx, ctx->namespace, ctx->podname,
+    ret = get_api_server_info(ctx, ctx->namespace, ctx->podname, NULL,
                               &meta_buf, &meta_size);
     if (ret == -1) {
         if (!ctx->podname) {
@@ -1014,5 +1036,9 @@ int flb_kube_meta_release(struct flb_kube_meta *meta)
         flb_free(meta->cache_key);
     }
 
+    if (meta->pod_uid) {
+        flb_free(meta->pod_uid);
+        r++;
+    }
     return r;
 }
