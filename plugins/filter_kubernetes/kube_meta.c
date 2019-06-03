@@ -162,34 +162,42 @@ static int get_api_server_info(struct flb_kube *ctx,
         char *payload = NULL;
         size_t payload_size = 0;
         struct stat sb;
+        int meta_found = FLB_FALSE;
 
         if (namespace && podname) {
             ret = snprintf(uri, sizeof(uri) - 1, "%s/%s-%s.meta", ctx->meta_preload_cache_dir, namespace, podname);
+            meta_found = FLB_TRUE;
         } else if (pod_uid) {
-            ret = snprintf(uri, sizeof(uri) - 1, "%s/%s-%s.meta", ctx->meta_preload_cache_dir, pod_uid);            
+            ret = snprintf(uri, sizeof(uri) - 1, "%s/%s-%s.meta", ctx->meta_preload_cache_dir, pod_uid);    
+            meta_found = FLB_TRUE;        
+        } else {
+            // no matches, need to get out
+            meta_found = FLB_FALSE;
         }
-        if (ret > 0) {
-            fd = open(uri, O_RDONLY, 0);
-            if (fd > 0) {
-                if (fstat(fd, &sb) == 0) {
-                    payload = flb_malloc(sb.st_size);
-                    if (payload) {
-                        ret = read(fd, payload, sb.st_size);
-                        if (ret == sb.st_size) {
-                            payload_size = ret;
+        if (meta_found) {
+            if (ret > 0) {
+                fd = open(uri, O_RDONLY, 0);
+                if (fd > 0) {
+                    if (fstat(fd, &sb) == 0) {
+                        payload = flb_malloc(sb.st_size);
+                        if (payload) {
+                            ret = read(fd, payload, sb.st_size);
+                            if (ret == sb.st_size) {
+                                payload_size = ret;
+                            }
                         }
                     }
+                    close(fd);
                 }
-                close(fd);
             }
-        }
-        if (payload_size) {
-            packed = flb_pack_json(payload, payload_size,
-                                   &buf, &size, &root_type);
-        }
+            if (payload_size) {
+                packed = flb_pack_json(payload, payload_size,
+                                    &buf, &size, &root_type);
+            }
 
-        if (payload) {
-            flb_free(payload);
+            if (payload) {
+                flb_free(payload);
+            }
         }
     }
 
