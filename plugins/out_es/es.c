@@ -28,6 +28,7 @@
 #include <msgpack.h>
 
 #include <time.h>
+#include <string.h>
 
 #include "es.h"
 #include "es_conf.h"
@@ -163,6 +164,15 @@ static char *elasticsearch_format(const void *data, size_t bytes,
     int i;
     msgpack_object key;
     msgpack_object val;
+    char* prefix_key;
+    char* prefix_key_inner;    
+    int prefix_key_length;
+    int prefix_inner_length;
+    int tmp_len;
+    int inner_map_size;
+    msgpack_object inner_key;
+    msgpack_object inner_val;    
+
 
     /* Iterate the original buffer and perform adjustments */
     msgpack_unpacked_init(&result);
@@ -265,29 +275,58 @@ static char *elasticsearch_format(const void *data, size_t bytes,
 
         es_index_custom_len = 0;
         if (ctx->logstash_prefix_key_len != 0) {
+            // see if this is multi level key
+            prefix_key = ctx->logstash_prefix_key;
+            prefix_key_length = ctx->logstash_prefix_key_len; 
+            prefix_key_inner = strchr(prefix_key, '/');
+            if (prefix_key_inner != NULL) {
+                tmp_len = prefix_key_inner - prefix_key;
+                prefix_inner_length = prefix_key_length - tmp_len - 1;
+                prefix_key_inner ++;  // advance it to pass the / character
+                prefix_key_length = tmp_len; 
+            }
             for (i = 0; i < map_size; i++) {
                 key = map.via.map.ptr[i].key;
                 if (key.type != MSGPACK_OBJECT_STR) {
                     continue;
                 }
-                if (key.via.str.size != ctx->logstash_prefix_key_len) {
+                if (key.via.str.size != prefix_key_length) {
                     continue;
                 }
-                if (strncmp(key.via.str.ptr, ctx->logstash_prefix_key, ctx->logstash_prefix_key_len) != 0) {
+                if (strncmp(key.via.str.ptr, prefix_key, prefix_key_length) != 0) {
                     continue;
                 }
                 val = map.via.map.ptr[i].val;
-                if (val.type != MSGPACK_OBJECT_STR) {
-                    continue;
+                if (prefix_key_inner != NULL && val.type == MSGPACK_OBJECT_MAP) {
+                    inner_map_size = val.via.map.size;
+                    if (inner_map_size != 0) {
+                        for (i = 0; i < inner_map_size; i++) {
+                            inner_key = val.via.map.ptr[i].key;
+                            inner_val = val.via.map.ptr[i].val;
+                            if (inner_key.type != MSGPACK_OBJECT_STR) {
+                                continue;
+                            }
+                            if (inner_key.via.str.size != prefix_inner_length) {
+                                continue;
+                            }     
+                            if (strncmp(inner_key.via.str.ptr, prefix_key_inner, prefix_inner_length) != 0) {
+                                continue;
+                            }                                                   
+                            // matched
+                            es_index_custom = inner_val.via.str.ptr;
+                            es_index_custom_len = inner_val.via.str.size;
+                            memcpy(logstash_index, es_index_custom, es_index_custom_len);
+                            logstash_index[es_index_custom_len] = '\0';
+                            break;
+                        }
+                    }
+                } else if (val.type == MSGPACK_OBJECT_STR && val.via.str.size < 128) {
+                    es_index_custom = val.via.str.ptr;
+                    es_index_custom_len = val.via.str.size;
+                    memcpy(logstash_index, es_index_custom, es_index_custom_len);
+                    logstash_index[es_index_custom_len] = '\0';
+                    break;
                 }
-                if (val.via.str.size >= 128) {
-                    continue;
-                }
-                es_index_custom = val.via.str.ptr;
-                es_index_custom_len = val.via.str.size;
-                memcpy(logstash_index, es_index_custom, es_index_custom_len);
-                logstash_index[es_index_custom_len] = '\0';
-                break;
             }
         }
 
