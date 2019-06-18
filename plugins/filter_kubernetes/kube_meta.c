@@ -168,7 +168,9 @@ static int get_api_server_info(struct flb_kube *ctx,
             ret = snprintf(uri, sizeof(uri) - 1, "%s/%s-%s.meta", ctx->meta_preload_cache_dir, namespace, podname);
             meta_found = FLB_TRUE;
         } else if (pod_uid) {
-            ret = snprintf(uri, sizeof(uri) - 1, "%s/%s-%s.meta", ctx->meta_preload_cache_dir, pod_uid);    
+            flb_debug("[filter_kube] PreloadCache (pod_uuid=%s) cache_dir=%s",
+                  pod_uid, ctx->meta_preload_cache_dir);
+            ret = snprintf(uri, sizeof(uri) - 1, "%s/%s.meta", ctx->meta_preload_cache_dir, pod_uid);    
             meta_found = FLB_TRUE;        
         } else {
             // no matches, need to get out
@@ -303,7 +305,7 @@ static void cb_results(const char *name, const char *value,
              strcmp(name, "pod_uid") == 0) {
         meta->pod_uid = flb_strndup(value, vlen);
         meta->pod_uid_len = vlen;
-        meta->skip++;
+        //meta->skip++;
     }
     return;
 }
@@ -414,6 +416,8 @@ static int merge_meta(struct flb_kube_meta *meta, struct flb_kube *ctx,
     int have_labels = -1;
     int have_annotations = -1;
     int have_nodename = -1;
+    int have_meta_name = -1;
+    int have_meta_namespace = -1;        
     size_t off = 0;
     msgpack_sbuffer mp_sbuf;
     msgpack_packer mp_pck;
@@ -487,7 +491,7 @@ static int merge_meta(struct flb_kube_meta *meta, struct flb_kube *ctx,
         }
 	else if (k.via.str.size == 4 && !strncmp(k.via.str.ptr, "spec", 4)) {
            spec_val = api_map.via.map.ptr[i].val;
-           spec_found = FLB_TRUE;
+           spec_found = FLB_TRUE;       
         }
 	else if (k.via.str.size == 6 && !strncmp(k.via.str.ptr, "status", 6)) {
            status_val = api_map.via.map.ptr[i].val;
@@ -519,15 +523,21 @@ static int merge_meta(struct flb_kube_meta *meta, struct flb_kube *ctx,
                 map_size++;
             }
         }
-
         else if (size == 11 && strncmp(ptr, "annotations", 11) == 0) {
             have_annotations = i;
             if (ctx->annotations == FLB_TRUE) {
                 map_size++;
             }
+        } 
+        else if (size == 4 && strncmp(ptr, "name", 4) == 0) {
+            have_meta_name = i;
+            map_size++;
         }
-
-        if (have_uid >= 0 && have_labels >= 0 && have_annotations >= 0) {
+        else if (size == 9 && strncmp(ptr, "namespace", 9) == 0) {
+            have_meta_namespace = i;
+            map_size++;
+        }
+        if (have_uid >= 0 && have_labels >= 0 && have_annotations >= 0 && have_meta_name >= 0 && have_meta_namespace >= 0) {
             break;
         }
     }
@@ -556,12 +566,24 @@ static int merge_meta(struct flb_kube_meta *meta, struct flb_kube *ctx,
         msgpack_pack_str_body(&mp_pck, "pod_name", 8);
         msgpack_pack_str(&mp_pck, meta->podname_len);
         msgpack_pack_str_body(&mp_pck, meta->podname, meta->podname_len);
+    } 
+    else if (have_meta_name >= 0) {
+        v = meta_val.via.map.ptr[have_meta_name].val;
+        msgpack_pack_str(&mp_pck, 8);
+        msgpack_pack_str_body(&mp_pck, "pod_name", 8);
+        msgpack_pack_object(&mp_pck, v);                      
     }
     if (meta->namespace != NULL) {
         msgpack_pack_str(&mp_pck, 14);
         msgpack_pack_str_body(&mp_pck, "namespace_name", 14);
         msgpack_pack_str(&mp_pck, meta->namespace_len);
         msgpack_pack_str_body(&mp_pck, meta->namespace, meta->namespace_len);
+    }
+    else if (have_meta_namespace >= 0) {
+        v = meta_val.via.map.ptr[have_meta_namespace].val;
+        msgpack_pack_str(&mp_pck, 14);
+        msgpack_pack_str_body(&mp_pck, "namespace_name", 14);
+        msgpack_pack_object(&mp_pck, v);     
     }
 
     /* Append API Server content */
@@ -636,7 +658,6 @@ static int merge_meta(struct flb_kube_meta *meta, struct flb_kube *ctx,
     /* Set outgoing msgpack buffer */
     *out_buf = mp_sbuf.data;
     *out_size = mp_sbuf.size;
-
     return 0;
 }
 
@@ -775,7 +796,7 @@ static inline int extract_meta(struct flb_kube *ctx,
         memcpy(meta->cache_key, meta->pod_uid, meta->pod_uid_len);
         off = meta->pod_uid_len;
         meta->cache_key[off] = '\0';
-        meta->cache_key_len = off;                
+        meta->cache_key_len = off;              
     }
     else {
         meta->cache_key = NULL;

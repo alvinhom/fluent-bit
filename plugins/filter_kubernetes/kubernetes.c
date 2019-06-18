@@ -395,7 +395,7 @@ static int pack_map_content(msgpack_packer *pck, msgpack_sbuffer *sbuf,
     }
 
     /* Kubernetes */
-    if (kube_buf && kube_size > 0) {
+    if (kube_buf && kube_size > 0) {    
         msgpack_pack_str(pck, 10);
         msgpack_pack_str_body(pck, "kubernetes", 10);
 
@@ -483,7 +483,7 @@ static int cb_kube_filter(const void *data, size_t bytes,
             ret = flb_kube_meta_get(ctx,
                                     tag, tag_len,
                                     data, bytes,
-                                    &cache_buf, &cache_size, &meta, &props);
+                                    &cache_buf, &cache_size, &meta, &props);                                    
         }
         if (ret == -1) {
             flb_kube_prop_destroy(&props);
@@ -566,7 +566,7 @@ static int cb_kube_filter(const void *data, size_t bytes,
         ret = pack_map_content(&tmp_pck, &tmp_sbuf,
                                map,
                                cache_buf, cache_size,
-                               &meta, &time_lookup, parser, ctx);
+                               &meta, &time_lookup, parser, ctx);                     
         if (ret == -1) {
             msgpack_sbuffer_destroy(&tmp_sbuf);
             msgpack_unpacked_destroy(&result);
