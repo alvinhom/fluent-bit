@@ -29,6 +29,7 @@
 #include <fluent-bit/flb_sds.h>
 #include <fluent-bit/flb_slist.h>
 #include <fluent-bit/stream_processor/flb_sp_parser.h>
+#include <fluent-bit/stream_processor/flb_sp_record_func.h>
 
 #include "sql_parser.h"
 #include "sql_lex.h"
@@ -86,6 +87,13 @@ void flb_sp_cmd_key_del(struct flb_sp_cmd_key *key)
     if (key->alias) {
         flb_sds_destroy(key->alias);
     }
+    if (key->name_keys) {
+        flb_sds_destroy(key->name_keys);
+    }
+    if (key->subkeys) {
+        flb_slist_destroy(key->subkeys);
+        flb_free(key->subkeys);
+    }
     flb_free(key);
 }
 
@@ -100,10 +108,14 @@ void flb_sp_cmd_gb_key_del(struct flb_sp_cmd_gb_key *key)
 int flb_sp_cmd_key_add(struct flb_sp_cmd *cmd, int func,
                        const char *key_name, const char *key_alias)
 {
+    int s;
     int aggr_func = 0;
     int time_func = 0;
     int record_func = 0;
+    char *tmp;
+    struct mk_list *head;
     struct flb_sp_cmd_key *key;
+    struct flb_slist_entry *entry;
 
     /* aggregation function ? */
     if (func >= FLB_SP_AVG && func <= FLB_SP_MAX) {
@@ -124,6 +136,7 @@ int flb_sp_cmd_key_add(struct flb_sp_cmd *cmd, int func,
         cmd->status = FLB_SP_ERROR;
         return -1;
     }
+    key->subkeys = NULL;
 
     /* key name and aliases works when the selection is not a wildcard */
     if (key_name) {
@@ -166,6 +179,69 @@ int flb_sp_cmd_key_add(struct flb_sp_cmd *cmd, int func,
     }
     else if (record_func > 0) {
         key->record_func = record_func;
+    }
+
+    /* Lookup for any subkeys in the temporal list */
+    if (mk_list_size(cmd->tmp_subkeys) > 0) {
+        /* Map context keys into this command key structure */
+        key->subkeys = cmd->tmp_subkeys;
+        cmd->tmp_subkeys = flb_malloc(sizeof(struct mk_list));
+        if (!cmd->tmp_subkeys) {
+            flb_errno();
+            cmd->tmp_subkeys = key->subkeys;
+            flb_sp_cmd_key_del(key);
+            cmd->status = FLB_SP_ERROR;
+            return -1;
+        }
+        flb_slist_create(cmd->tmp_subkeys);
+
+        /* Compose a name key that include listed sub keys */
+        s = flb_sds_len(key->name) + (16 * mk_list_size(key->subkeys));
+        key->name_keys = flb_sds_create_size(s);
+        if (!key->name_keys) {
+            flb_sp_cmd_key_del(key);
+            return -1;
+        }
+
+        tmp = flb_sds_cat(key->name_keys, key->name, flb_sds_len(key->name));
+        if (tmp != key->name_keys) {
+            key->name_keys = tmp;
+        }
+
+        mk_list_foreach(head, key->subkeys) {
+            entry = mk_list_entry(head, struct flb_slist_entry, _head);
+
+            /* prefix */
+            tmp = flb_sds_cat(key->name_keys, "['", 2);
+            if (tmp) {
+                key->name_keys = tmp;
+            }
+            else {
+                flb_sp_cmd_key_del(key);
+                return -1;
+            }
+
+            /* selected key name */
+            tmp = flb_sds_cat(key->name_keys,
+                              entry->str, flb_sds_len(entry->str));
+            if (tmp) {
+                key->name_keys = tmp;
+            }
+            else {
+                flb_sp_cmd_key_del(key);
+                return -1;
+            }
+
+            /* suffix */
+            tmp = flb_sds_cat(key->name_keys, "']", 2);
+            if (tmp) {
+                key->name_keys = tmp;
+            }
+            else {
+                flb_sp_cmd_key_del(key);
+                return -1;
+            }
+        }
     }
 
     mk_list_add(&key->_head, &cmd->keys);
@@ -515,7 +591,40 @@ struct flb_exp *flb_sp_cmd_condition_null(struct flb_sp_cmd *cmd)
     return (struct flb_exp *) val;
 }
 
+struct flb_exp *flb_sp_record_function_add(struct flb_sp_cmd *cmd,
+                                           char *name, struct flb_exp *param)
+{
+    char *rf_name;
+    int i;
+    struct flb_exp_func *func;
+
+    for (i = 0; i < RECORD_FUNCTIONS_SIZE; i++)
+    {
+        rf_name = record_functions[i];
+        if (strncmp(rf_name, name, strlen(rf_name)) == 0)
+        {
+            func = flb_calloc(1, sizeof(struct flb_exp_func));
+            if (!func) {
+                flb_errno();
+                return NULL;
+            }
+
+            func->type = FLB_EXP_FUNC;
+            func->name = flb_sds_create(name);
+            func->cb_func = record_functions_ptr[i];
+            func->param = param;
+
+            mk_list_add(&func->_head, &cmd->cond_list);
+
+            return (struct flb_exp *) func;
+        }
+    }
+
+    return NULL;
+}
+
 void flb_sp_cmd_condition_add(struct flb_sp_cmd *cmd, struct flb_exp *e)
+
 {
     cmd->condition = e;
 }
@@ -547,6 +656,7 @@ void flb_sp_cmd_condition_del(struct flb_sp_cmd *cmd)
     struct flb_exp *exp;
     struct flb_exp_key *key;
     struct flb_exp_val *val;
+    struct flb_exp_func *func;
 
     mk_list_foreach_safe(head, tmp, &cmd->cond_list) {
         exp = mk_list_entry(head, struct flb_exp, _head);
@@ -562,6 +672,11 @@ void flb_sp_cmd_condition_del(struct flb_sp_cmd *cmd)
             val = (struct flb_exp_val *) exp;
             flb_sds_destroy(val->val.string);
         }
+        else if (exp->type == FLB_EXP_FUNC) {
+            func = (struct flb_exp_func *) exp;
+            flb_sds_destroy(func->name);
+        }
+
         mk_list_del(&exp->_head);
         flb_free(exp);
     }

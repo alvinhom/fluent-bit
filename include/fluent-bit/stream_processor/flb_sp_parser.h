@@ -23,6 +23,7 @@
 
 #include <fluent-bit/flb_info.h>
 #include <fluent-bit/flb_sds.h>
+#include <fluent-bit/flb_time.h>
 #include <fluent-bit/stream_processor/flb_sp.h>
 #include <fluent-bit/stream_processor/flb_sp_window.h>
 
@@ -62,7 +63,8 @@ enum Expressions {
     FLB_EXP_INT,
     FLB_EXP_FLOAT,
     FLB_EXP_STRING,
-    FLB_EXP_NULL
+    FLB_EXP_NULL,
+    FLB_EXP_FUNC
 };
 
 /* Logical operation */
@@ -105,8 +107,10 @@ struct flb_sp_cmd_key {
     int aggr_func;            /* Aggregation function */
     int time_func;            /* Time function */
     int record_func;          /* Record function */
-    flb_sds_t name;           /* Key name */
-    flb_sds_t alias;          /* Key output alias */
+    flb_sds_t name;           /* Parent Key name */
+    flb_sds_t alias;          /* Key output alias (key AS alias) */
+    flb_sds_t name_keys;      /* Key name with sub-keys */
+    struct mk_list *subkeys;  /* sub-keys selection */
     struct mk_list _head;     /* Link to flb_sp_cmd->keys */
 };
 
@@ -180,9 +184,25 @@ struct flb_exp_key {
     struct mk_list *subkeys;
 };
 
+struct flb_exp_func {
+    int type;
+    struct mk_list _head;
+    flb_sds_t name;
+    struct flb_exp_val *(*cb_func) (const char *, int,
+                                    struct flb_time *, struct flb_exp_val *);
+    struct flb_exp *param;
+};
+
 struct flb_exp_val {
     int type;
     struct mk_list _head;
+    sp_val val;
+};
+
+/* Represent any value object */
+struct flb_sp_value {
+    int type;
+    msgpack_object o;
     sp_val val;
 };
 
@@ -221,10 +241,13 @@ struct flb_exp *flb_sp_cmd_condition_string(struct flb_sp_cmd *cmd,
 struct flb_exp *flb_sp_cmd_condition_boolean(struct flb_sp_cmd *cmd,
                                              bool boolean);
 struct flb_exp *flb_sp_cmd_condition_null(struct flb_sp_cmd *cmd);
+struct flb_exp *flb_sp_record_function_add(struct flb_sp_cmd *cmd,
+                                           char *name, struct flb_exp *param);
 
 void flb_sp_cmd_condition_del(struct flb_sp_cmd *cmd);
 
 int flb_sp_cmd_gb_key_add(struct flb_sp_cmd *cmd, const char *key);
 void flb_sp_cmd_gb_key_del(struct flb_sp_cmd_gb_key *key);
+
 
 #endif
