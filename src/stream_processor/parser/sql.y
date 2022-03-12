@@ -1,15 +1,16 @@
+%name-prefix="flb_sp_"  // replace with %define api.prefix {flb_sp_}
 %define api.pure full
+%define parse.error verbose
 %parse-param { struct flb_sp_cmd *cmd };
 %parse-param { const char *query };
 %lex-param   { void *scanner }
 %parse-param { void *scanner }
 
-%{
+%{ // definition section (prologue)
 #include <stdio.h>
 #include <stdlib.h>
-#include <stdbool.h>
+#include <ctype.h>
 
-#include <fluent-bit/flb_info.h>
 #include <fluent-bit/flb_mem.h>
 #include <fluent-bit/flb_slist.h>
 #include <fluent-bit/stream_processor/flb_sp_parser.h>
@@ -19,28 +20,31 @@
 
 extern int yylex();
 
-void yyerror(struct flb_sp_cmd *cmd, const char *query, void *scanner,
-             const char *str)
+void yyerror(struct flb_sp_cmd *cmd, const char *query, void *scanner, const char *str)
 {
     flb_error("[sp] %s at '%s'", str, query);
 }
 
 %} /* EOF C code */
 
-
+/* Bison declarations */
 /* Known Tokens (refer to sql.l) */
 
 /* Keywords */
-%token IDENTIFIER QUOTE QUOTED
+%token IDENTIFIER QUOTE
 
 /* Basic keywords for statements */
-%token CREATE STREAM WITH SELECT AS FROM FROM_STREAM FROM_TAG WHERE WINDOW GROUP_BY
+%token CREATE STREAM SNAPSHOT FLUSH WITH SELECT AS FROM FROM_STREAM FROM_TAG
+%token WHERE WINDOW GROUP_BY LIMIT
 
 /* Null keywords */
 %token IS NUL
 
 /* Aggregation functions */
-%token AVG SUM COUNT MAX MIN
+%token AVG SUM COUNT MAX MIN TIMESERIES_FORECAST
+
+/* Record functions */
+%token RECORD CONTAINS TIME
 
 /* Time functions */
 %token NOW UNIX_TIMESTAMP
@@ -52,15 +56,13 @@ void yyerror(struct flb_sp_cmd *cmd, const char *query, void *scanner,
 %token INTEGER FLOATING STRING BOOLTYPE
 
 /* Logical operation tokens */
-%token AND OR NOT LT LTE GT GTE
+%token AND OR NOT NEQ LT LTE GT GTE
 
 /* Time tokens */
 %token HOUR MINUTE SECOND
 
 /* Window tokens */
-%token TUMBLING
-
-%define parse.error verbose
+%token TUMBLING HOPPING ADVANCE_BY
 
 /* Union and field types */
 %union
@@ -73,22 +75,29 @@ void yyerror(struct flb_sp_cmd *cmd, const char *query, void *scanner,
     struct flb_exp *expression;
 }
 
-%type <string>     IDENTIFIER
+%type <boolean>    BOOLTYPE
 %type <integer>    INTEGER
 %type <fval>       FLOATING
+%type <string>     IDENTIFIER
 %type <string>     STRING
-%type <boolean>    BOOLTYPE
 %type <string>     record_keys
 %type <string>     record_key
-%type <string>     alias
 %type <string>     prop_key
 %type <string>     prop_val
 %type <expression> condition
 %type <expression> comparison
 %type <expression> key
+%type <expression> record_func
 %type <expression> value
 %type <expression> null
 %type <integer>    time
+
+%type <integer> time_record_func
+%type <integer> NOW UNIX_TIMESTAMP RECORD_TAG RECORD_TIME
+
+%type <integer> aggregate_func
+%type <integer> COUNT AVG SUM MAX MIN TIMESERIES_FORECAST
+
 
 %destructor { flb_free ($$); } IDENTIFIER
 
@@ -109,6 +118,30 @@ create:
         flb_sp_cmd_stream_new(cmd, $3);
         flb_free($3);
       }
+      |
+      CREATE SNAPSHOT IDENTIFIER AS SELECT '*' FROM source limit ';'
+      {
+        flb_sp_cmd_snapshot_new(cmd, $3);
+        flb_free($3);
+      }
+      |
+      CREATE SNAPSHOT IDENTIFIER WITH '(' properties ')' AS SELECT '*' FROM source limit ';'
+      {
+        flb_sp_cmd_snapshot_new(cmd, $3);
+        flb_free($3);
+      }
+      |
+      FLUSH SNAPSHOT IDENTIFIER AS SELECT '*' FROM source where ';'
+      {
+        flb_sp_cmd_snapshot_flush_new(cmd, $3);
+        flb_free($3);
+      }
+      |
+      FLUSH SNAPSHOT IDENTIFIER WITH '(' properties ')' AS SELECT '*' FROM source where ';'
+      {
+        flb_sp_cmd_snapshot_flush_new(cmd, $3);
+        flb_free($3);
+      }
       properties: property
                   |
                   properties ',' property
@@ -122,7 +155,7 @@ create:
       prop_val: STRING
 
 /* Parser for 'SELECT' statement */
-select: SELECT keys FROM source window where groupby ';'
+select: SELECT keys FROM source window where groupby limit ';'
       {
         cmd->type = FLB_SP_SELECT;
       }
@@ -132,142 +165,78 @@ select: SELECT keys FROM source window where groupby ';'
                    record_keys ',' record_key
       record_key: '*'
                   {
-                    flb_sp_cmd_key_add(cmd, -1, NULL, NULL);
+                    flb_sp_cmd_key_add(cmd, -1, NULL);
                   }
                   |
-                  IDENTIFIER
+                  IDENTIFIER key_alias
                   {
-                    flb_sp_cmd_key_add(cmd, -1, $1, NULL);
+                    flb_sp_cmd_key_add(cmd, -1, $1);
                     flb_free($1);
                   }
                   |
-                  IDENTIFIER AS alias
+                  IDENTIFIER record_subkey key_alias
                   {
-                    flb_sp_cmd_key_add(cmd, -1, $1, $3);
+                    flb_sp_cmd_key_add(cmd, -1, $1);
                     flb_free($1);
+                  }
+                  |
+                  COUNT '(' '*' ')' key_alias
+                  {
+                    flb_sp_cmd_key_add(cmd, $1, NULL);
+                  }
+                  |
+                  COUNT '(' IDENTIFIER ')' key_alias
+                  {
+                    flb_sp_cmd_key_add(cmd, $1, $3);
                     flb_free($3);
                   }
                   |
-                  AVG '(' IDENTIFIER ')'
+                  COUNT '(' IDENTIFIER record_subkey ')' key_alias
                   {
-                    flb_sp_cmd_key_add(cmd, FLB_SP_AVG, $3, NULL);
+                    flb_sp_cmd_key_add(cmd, $1, $3);
                     flb_free($3);
                   }
                   |
-                  AVG '(' IDENTIFIER ')' AS alias
+                  aggregate_func '(' IDENTIFIER ')' key_alias
                   {
-                    flb_sp_cmd_key_add(cmd, FLB_SP_AVG, $3, $6);
-                    flb_free($3);
-                    flb_free($6);
-                  }
-                  |
-                  SUM '(' IDENTIFIER ')'
-                  {
-                    flb_sp_cmd_key_add(cmd, FLB_SP_SUM, $3, NULL);
+                    flb_sp_cmd_key_add(cmd, $1, $3);
                     flb_free($3);
                   }
                   |
-                  SUM '(' IDENTIFIER ')' AS alias
+                   aggregate_func '(' IDENTIFIER record_subkey ')' key_alias
                   {
-                    flb_sp_cmd_key_add(cmd, FLB_SP_SUM, $3, $6);
-                    flb_free($3);
-                    flb_free($6);
-                  }
-                  |
-                  COUNT '(' '*' ')'
-                  {
-                    flb_sp_cmd_key_add(cmd, FLB_SP_COUNT, NULL, NULL);
-                  }
-                  |
-                  COUNT '(' '*' ')' AS alias
-                  {
-                    flb_sp_cmd_key_add(cmd, FLB_SP_COUNT, NULL, $6);
-                    flb_free($6);
-                  }
-                  |
-                  COUNT '(' IDENTIFIER ')'
-                  {
-                    flb_sp_cmd_key_add(cmd, FLB_SP_COUNT, $3, NULL);
+                    flb_sp_cmd_key_add(cmd, $1, $3);
                     flb_free($3);
                   }
                   |
-                  COUNT '(' IDENTIFIER ')' AS alias
+                  TIMESERIES_FORECAST '(' IDENTIFIER ',' INTEGER ')' key_alias
                   {
-                    flb_sp_cmd_key_add(cmd, FLB_SP_COUNT, $3, $6);
-                    flb_free($3);
-                    flb_free($6);
-                  }
-                  |
-                  MIN '(' IDENTIFIER ')'
-                  {
-                    flb_sp_cmd_key_add(cmd, FLB_SP_MIN, $3, NULL);
+                    flb_sp_cmd_timeseries_forecast(cmd, $1, $3, $5);
                     flb_free($3);
                   }
                   |
-                  MIN '(' IDENTIFIER ')' AS alias
+                  time_record_func '(' ')' key_alias
                   {
-                    flb_sp_cmd_key_add(cmd, FLB_SP_MIN, $3, $6);
-                    flb_free($3);
-                    flb_free($6);
+                    flb_sp_cmd_key_add(cmd, $1, NULL);
                   }
-                  |
-                  MAX '(' IDENTIFIER ')'
-                  {
-                    flb_sp_cmd_key_add(cmd, FLB_SP_MAX, $3, NULL);
-                    flb_free($3);
-                  }
-                  |
-                  MAX '(' IDENTIFIER ')' AS alias
-                  {
-                    flb_sp_cmd_key_add(cmd, FLB_SP_MAX, $3, $6);
-                    flb_free($3);
-                    flb_free($6);
-                  }
-                  |
-                  NOW '(' ')'
-                  {
-                    flb_sp_cmd_key_add(cmd, FLB_SP_NOW, NULL, NULL);
-                  }
-                  |
-                  NOW '(' ')' AS alias
-                  {
-                    flb_sp_cmd_key_add(cmd, FLB_SP_NOW, NULL, $5);
-                    flb_free($5);
-                  }
-                  |
-                  UNIX_TIMESTAMP '(' ')'
-                  {
-                    flb_sp_cmd_key_add(cmd, FLB_SP_UNIX_TIMESTAMP, NULL, NULL);
-                  }
-                  |
-                  UNIX_TIMESTAMP '(' ')' AS alias
-                  {
-                    flb_sp_cmd_key_add(cmd, FLB_SP_UNIX_TIMESTAMP, NULL, $5);
-                    flb_free($5);
-                  }
-                  |
-                  RECORD_TAG '(' ')'
-                  {
-                    flb_sp_cmd_key_add(cmd, FLB_SP_RECORD_TAG, NULL, NULL);
-                  }
-                  |
-                  RECORD_TAG '(' ')' AS alias
-                  {
-                    flb_sp_cmd_key_add(cmd, FLB_SP_RECORD_TAG, NULL, $5);
-                    flb_free($5);
-                  }
-                  |
-                  RECORD_TIME '(' ')'
-                  {
-                    flb_sp_cmd_key_add(cmd, FLB_SP_RECORD_TIME, NULL, NULL);
-                  }
-                  |
-                  RECORD_TIME '(' ')' AS alias
-                  {
-                    flb_sp_cmd_key_add(cmd, FLB_SP_RECORD_TIME, NULL, $5);
-                    flb_free($5);
-                  }
-      alias: IDENTIFIER
+      aggregate_func:
+            AVG | SUM | MAX | MIN
+      time_record_func:
+            NOW | UNIX_TIMESTAMP | RECORD_TAG | RECORD_TIME
+      key_alias:
+             %empty
+             |
+             AS IDENTIFIER
+             {
+                 flb_sp_cmd_alias_add(cmd, $2);
+             }
+      record_subkey: '[' STRING ']'
+             {
+               flb_slist_add(cmd->tmp_subkeys, $2);
+               flb_free($2);
+             }
+             |
+             record_subkey record_subkey
       source: FROM_STREAM IDENTIFIER
               {
                 flb_sp_cmd_source(cmd, FLB_SP_STREAM, $2);
@@ -291,10 +260,21 @@ select: SELECT keys FROM source window where groupby ';'
       groupby: %empty
                |
                GROUP_BY gb_keys
+      limit: %empty
+             |
+             LIMIT INTEGER
+             {
+                 flb_sp_cmd_limit_add(cmd, $2);
+             }
       window_spec:
               TUMBLING '(' INTEGER time ')'
               {
-                flb_sp_cmd_window(cmd, FLB_SP_WINDOW_TUMBLING, $3, $4);
+                flb_sp_cmd_window(cmd, FLB_SP_WINDOW_TUMBLING, $3, $4, 0, 0);
+              }
+              |
+              HOPPING '(' INTEGER time ',' ADVANCE_BY INTEGER time ')'
+              {
+                flb_sp_cmd_window(cmd, FLB_SP_WINDOW_HOPPING, $3, $4, $7, $8);
               }
       condition: comparison
                  |
@@ -327,11 +307,7 @@ select: SELECT keys FROM source window where groupby ';'
                  {
                    $$ = flb_sp_cmd_operation(cmd, $1, $3, FLB_EXP_OR);
                  }
-      comparison: key '=' value
-                  {
-                    $$ = flb_sp_cmd_comparison(cmd, $1, $3, FLB_EXP_EQ);
-                  }
-                  |
+      comparison:
                   key IS null
                   {
                     $$ = flb_sp_cmd_comparison(cmd, $1, $3, FLB_EXP_EQ);
@@ -344,43 +320,68 @@ select: SELECT keys FROM source window where groupby ';'
                              NULL, FLB_EXP_NOT);
                   }
                   |
-                  key LT value
+                  record_func
+                  {
+                    $$ = flb_sp_cmd_comparison(cmd,
+                             $1,
+                             flb_sp_cmd_condition_boolean(cmd, true),
+                             FLB_EXP_EQ);
+                  }
+                  |
+                  record_func '=' value
+                  {
+                    $$ = flb_sp_cmd_comparison(cmd, $1, $3, FLB_EXP_EQ);
+                  }
+                  |
+                  record_func NEQ value
+                  {
+                    $$ = flb_sp_cmd_operation(cmd,
+                             flb_sp_cmd_comparison(cmd, $1, $3, FLB_EXP_EQ),
+                                 NULL, FLB_EXP_NOT)
+                    ;
+                  }
+                  |
+                  record_func LT value
                   {
                     $$ = flb_sp_cmd_comparison(cmd, $1, $3, FLB_EXP_LT);
                   }
                   |
-                  key LTE value
+                  record_func LTE value
                   {
                     $$ = flb_sp_cmd_comparison(cmd, $1, $3, FLB_EXP_LTE);
                   }
                   |
-                  key GT value
+                  record_func GT value
                   {
                     $$ = flb_sp_cmd_comparison(cmd, $1, $3, FLB_EXP_GT);
                   }
                   |
-                  key GTE value
+                  record_func GTE value
                   {
                     $$ = flb_sp_cmd_comparison(cmd, $1, $3, FLB_EXP_GTE);
                   }
+        record_func: key /* Similar to an identity function */
+                     |
+                     RECORD '.' CONTAINS '(' key ')'
+                     {
+                       $$ = flb_sp_record_function_add(cmd, "contains", $5);
+                     }
+                     |
+                     RECORD '.' TIME '(' ')'
+                     {
+                       $$ = flb_sp_record_function_add(cmd, "time", NULL);
+                     }
         key: IDENTIFIER
                    {
                      $$ = flb_sp_cmd_condition_key(cmd, $1);
                      flb_free($1);
                    }
              |
-             IDENTIFIER subkey
+             IDENTIFIER record_subkey
                    {
                      $$ = flb_sp_cmd_condition_key(cmd, $1);
                      flb_free($1);
                    }
-        subkey: '[' STRING ']'
-                   {
-                     flb_slist_add(cmd->tmp_subkeys, $2);
-                     flb_free($2);
-                   }
-             |
-             subkey subkey
         value: INTEGER
                {
                  $$ = flb_sp_cmd_condition_integer(cmd, $1);
@@ -419,15 +420,18 @@ select: SELECT keys FROM source window where groupby ';'
               {
                 $$ = FLB_SP_TIME_HOUR;
               }
-        gb_keys: IDENTIFIER
-                 {
-                   flb_sp_cmd_gb_key_add(cmd, $1);
-                   flb_free($1);
-                 }
+        gb_keys: gb_key
                  |
-                 IDENTIFIER ',' gb_keys
-                 {
-                   flb_sp_cmd_gb_key_add(cmd, $1);
-                   flb_free($1);
-                 }
-                 ;
+                 gb_key ',' gb_keys
+        gb_key: IDENTIFIER
+                {
+                  flb_sp_cmd_gb_key_add(cmd, $1);
+                  flb_free($1);
+                }
+                |
+                IDENTIFIER record_subkey
+                {
+                  flb_sp_cmd_gb_key_add(cmd, $1);
+                  flb_free($1);
+                }
+                ;

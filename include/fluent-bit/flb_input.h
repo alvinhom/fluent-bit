@@ -2,8 +2,7 @@
 
 /*  Fluent Bit
  *  ==========
- *  Copyright (C) 2019      The Fluent Bit Authors
- *  Copyright (C) 2015-2018 Treasure Data Inc.
+ *  Copyright (C) 2015-2022 The Fluent Bit Authors
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -23,7 +22,8 @@
 
 #include <fluent-bit/flb_info.h>
 #include <fluent-bit/flb_input_chunk.h>
-#include <fluent-bit/flb_thread.h>
+#include <fluent-bit/flb_engine_macros.h>
+#include <fluent-bit/flb_coro.h>
 #include <fluent-bit/flb_config.h>
 #include <fluent-bit/flb_network.h>
 #include <fluent-bit/flb_mem.h>
@@ -31,13 +31,15 @@
 #include <fluent-bit/flb_bits.h>
 #include <fluent-bit/flb_pipe.h>
 #include <fluent-bit/flb_filter.h>
-#include <fluent-bit/flb_thread.h>
+#include <fluent-bit/flb_coro.h>
 #include <fluent-bit/flb_mp.h>
+#include <fluent-bit/flb_hash.h>
 
 #ifdef FLB_HAVE_METRICS
 #include <fluent-bit/flb_metrics.h>
 #endif
 
+#include <cmetrics/cmetrics.h>
 #include <monkey/mk_core.h>
 #include <msgpack.h>
 
@@ -47,26 +49,33 @@
 #define FLB_COLLECT_FD_EVENT    2
 #define FLB_COLLECT_FD_SERVER   4
 
-/* Input plugin masks */
-#define FLB_INPUT_NET          4  /* input address may set host and port   */
-#define FLB_INPUT_THREAD     128  /* plugin requires a thread on callbacks */
-#define FLB_INPUT_PRIVATE    256  /* plugin is not published/exposed       */
-#define FLB_INPUT_NOTAG      512  /* plugin might don't have tags          */
+/* Input plugin flag masks */
+#define FLB_INPUT_NET          4   /* input address may set host and port   */
+#define FLB_INPUT_CORO       128   /* plugin requires a thread on callbacks */
+#define FLB_INPUT_PRIVATE    256   /* plugin is not published/exposed       */
+#define FLB_INPUT_NOTAG      512   /* plugin might don't have tags          */
 
 /* Input status */
 #define FLB_INPUT_RUNNING     1
 #define FLB_INPUT_PAUSED      0
 
+/* Input plugin event type */
+#define FLB_INPUT_LOGS        0
+#define FLB_INPUT_METRICS     1
+
 struct flb_input_instance;
 
 struct flb_input_plugin {
-    int flags;
+    int flags;                /* plugin flags */
+    int event_type;           /* event type to be genarated: logs ?, metrics ? */
 
     /* The Input name */
     char *name;
 
     /* Plugin Description */
     char *description;
+
+    struct flb_config_map *config_map;
 
     /* Initalization */
     int (*cb_init)    (struct flb_input_instance *, struct flb_config *, void *);
@@ -107,6 +116,8 @@ struct flb_input_plugin {
     /* Exit */
     int (*cb_exit) (void *, struct flb_config *);
 
+    void *instance;
+
     struct mk_list _head;
 };
 
@@ -118,6 +129,9 @@ struct flb_input_plugin {
  * and the variable one that is generated when the plugin is invoked.
  */
 struct flb_input_instance {
+    struct mk_event event;           /* events handler */
+    int event_type;                  /* FLB_INPUT_LOGS, FLB_INPUT_METRICS */
+
     /*
      * The instance flags are derivated from the fixed plugin flags. This
      * is done to offer some flexibility where a plugin instance per
@@ -130,16 +144,24 @@ struct flb_input_instance {
     int flags;
 
     int id;                              /* instance id                  */
+    int log_level;                       /* log level for this plugin    */
     flb_pipefd_t channel[2];             /* pipe(2) channel              */
-    int threaded;                        /* bool / Threaded instance ?   */
+    int runs_in_coroutine;               /* instance runs in coroutine ? */
     char name[32];                       /* numbered name (cpu -> cpu.0) */
     char *alias;                         /* alias name for the instance  */
     void *context;                       /* plugin configuration context */
+    flb_pipefd_t ch_events[2];           /* channel for events           */
     struct flb_input_plugin *p;          /* original plugin              */
 
     /* Plugin properties */
     char *tag;                           /* Input tag for routing        */
     int tag_len;
+
+    /* By default all input instances are 'routable' */
+    int routable;
+
+    /* flag to pause input when storage is full */
+    int storage_pause_on_chunks_overlimit;
 
     /*
      * Input network info:
@@ -160,6 +182,9 @@ struct flb_input_instance {
 
     /* Reference to struct flb_storage_input context */
     void *storage;
+
+    /* Type of storage: CIO_STORE_FS (filesystem) or CIO_STORE_MEM (memory) */
+    int storage_type;
 
     /*
      * Buffers counter: it count the total of memory used by fixed and dynamic
@@ -191,21 +216,38 @@ struct flb_input_instance {
     int mem_buf_status;
 
     /*
+     * Define the buffer status:
+     *
+     * - FLB_INPUT_RUNNING -> can append more data
+     * - FLB_INPUT_PAUSED  -> cannot append data
+     */
+    int storage_buf_status;
+
+    /*
      * Optional data passed to the plugin, this info is useful when
      * running Fluent Bit in library mode and the target plugin needs
      * some specific data from it caller.
      */
     void *data;
 
-#ifdef FLB_HAVE_STATS
-    int stats_fd;
-#endif
+    struct mk_list *config_map;          /* configuration map        */
 
     struct mk_list _head;                /* link to config->inputs     */
+
+    struct mk_list routes_direct;        /* direct routes set by API   */
     struct mk_list routes;               /* flb_router_path's list     */
-    struct mk_list chunks;               /* storage chunks             */
     struct mk_list properties;           /* properties / configuration */
     struct mk_list collectors;           /* collectors                 */
+
+    /* Storage Chunks */
+    struct mk_list chunks;               /* linked list of all chunks  */
+
+    /*
+     * The following list helps to separate the chunks per it
+     * status, it can be 'up' or 'down'.
+     */
+    struct mk_list chunks_up;            /* linked list of all chunks up */
+    struct mk_list chunks_down;          /* linked list of all chunks down */
 
     /*
      * Every co-routine created by the engine when flushing data, it's
@@ -213,11 +255,34 @@ struct flb_input_instance {
      */
     struct mk_list tasks;
 
-    struct mk_list threads;              /* engine taskslist           */
+    /* co-routines for input plugins with FLB_INPUT_CORO flag */
+    int input_coro_id;
+    struct mk_list input_coro_list;
+    struct mk_list input_coro_list_destroy;
 
 #ifdef FLB_HAVE_METRICS
+
+    /* old metrics API */
     struct flb_metrics *metrics;         /* metrics                    */
 #endif
+
+    /*
+     * CMetrics
+     * --------
+     */
+    struct cmt *cmt;                     /* parent context              */
+    struct cmt_counter *cmt_bytes;       /* metric: input_bytes_total   */
+    struct cmt_counter *cmt_records;     /* metric: input_records_total */
+
+    /*
+     * Indexes for generated chunks: simple hash tables that keeps the latest
+     * available chunks for writing data operations. This optimize the
+     * lookup for candidates chunks to write data.
+     *
+     * Starting from v1.8 we have separate hash tables for logs and metrics.
+     */
+    struct flb_hash *ht_log_chunks;
+    struct flb_hash *ht_metric_chunks;
 
     /* Keep a reference to the original context this instance belongs to */
     struct flb_config *config;
@@ -248,116 +313,61 @@ struct flb_input_collector {
     struct mk_list _head_ins;            /* link to instance collectors */
 };
 
-struct flb_input_thread {
-    int id;                      /* ID obtained from config->in_table_id */
-    time_t start_time;           /* start time  */
-    time_t end_time;             /* end time    */
-    struct flb_config *config;   /* FLB context */
-    struct flb_thread *parent;   /* Back reference to parent thread */
-    struct mk_list _head;        /* link to list on input_instance->threads */
+struct flb_input_coro {
+    int id;                         /* id returned from flb_input_coro_id_get() */
+    time_t start_time;              /* start time  */
+    time_t end_time;                /* end time    */
+    struct flb_input_instance *ins; /* parent input instance */
+    struct flb_coro *coro;          /* coroutine context */
+    struct flb_config *config;      /* FLB context */
+    struct mk_list _head;           /* link to list on input_instance->coros */
 };
 
-/*
- * Every thread created for an input instance plugin, requires to have an
- * unique Thread-ID. This function lookup the static table in the context
- * and return the lowest available ID.
- */
-static FLB_INLINE
-int flb_input_thread_get_id(struct flb_config *config)
-{
-    unsigned int i;
-
-    for (i = 0; i < (sizeof(config->in_table_id)/sizeof(uint16_t)); i++) {
-        if (config->in_table_id[i] == 0) {
-            config->in_table_id[i] = FLB_TRUE;
-            return i;
-        }
-    }
-
-    return -1;
-}
-
-/*
- * When an input thread ends, it needs to release it ID. This function
- * just mark the ID as unused.
- */
-static FLB_INLINE
-void flb_input_thread_del_id(int id, struct flb_config *config)
-{
-    config->in_table_id[id] = FLB_FALSE;
-}
+int flb_input_coro_id_get(struct flb_input_instance *ins);
 
 static FLB_INLINE
-int flb_input_thread_destroy_id(int id, struct flb_config *config)
+struct flb_input_coro *flb_input_coro_create(struct flb_input_instance *ins,
+                                             struct flb_config *config)
 {
-    struct mk_list *tmp;
-    struct mk_list *head;
-    struct mk_list *head_th;
-    struct flb_input_thread *in_th;
-    struct flb_input_instance *i_ins;
+    struct flb_coro *coro;
+    struct flb_input_coro *input_coro;
 
-    /* Iterate input-instances to find the thread */
-    mk_list_foreach(head, &config->inputs) {
-        i_ins = mk_list_entry(head, struct flb_input_instance, _head);
-        mk_list_foreach_safe(head_th, tmp, &i_ins->threads) {
-            in_th = mk_list_entry(head_th, struct flb_input_thread, _head);
-            if (in_th->id != id) {
-                continue;
-            }
-
-            mk_list_del(&in_th->_head);
-            flb_input_thread_del_id(id, config);
-            flb_thread_destroy(in_th->parent);
-            flb_debug("[input] destroy input_thread id=%i", id);
-            return 0;
-        }
-    }
-
-    return -1;
-}
-
-static FLB_INLINE
-struct flb_thread *flb_input_thread(struct flb_input_instance *i_ins,
-                                    struct flb_config *config)
-{
-    int id;
-    struct flb_thread *th;
-    struct flb_input_thread *in_th;
-
-    th = flb_thread_new(sizeof(struct flb_input_thread), NULL);
-    if (!th) {
+    /* input_coro context */
+    input_coro = (struct flb_input_coro *) flb_calloc(1,
+                                                      sizeof(struct flb_input_coro));
+    if (!input_coro) {
+        flb_errno();
         return NULL;
     }
 
-    /* Try to obtain an id */
-    id = flb_input_thread_get_id(config);
-    if (id == -1) {
-        flb_thread_destroy(th);
+    /* coroutine context */
+    coro = flb_coro_create(input_coro);
+    if (!coro) {
+        flb_free(input_coro);
         return NULL;
     }
 
-    /* Setup thread specific data */
-    in_th = (struct flb_input_thread *) FLB_THREAD_DATA(th);
-    in_th->id         = id;
-    in_th->start_time = time(NULL);
-    in_th->parent     = th;
-    in_th->config     = config;
-    mk_list_add(&in_th->_head, &i_ins->threads);
+    input_coro->id         = flb_input_coro_id_get(ins);
+    input_coro->ins        = ins;
+    input_coro->start_time = time(NULL);
+    input_coro->coro       = coro;
+    input_coro->config     = config;
 
-    return th;
+    mk_list_add(&input_coro->_head, &ins->input_coro_list);
+
+    return input_coro;
 }
-
-#if defined FLB_HAVE_FLUSH_LIBCO
 
 struct flb_libco_in_params {
     struct flb_config *config;
     struct flb_input_collector *coll;
-    struct flb_thread *th;
+    struct flb_coro *coro;
 };
 
-struct flb_libco_in_params libco_in_param;
+extern struct flb_libco_in_params libco_in_param;
+void flb_input_coro_prepare_destroy(struct flb_input_coro *input_coro);
 
-static FLB_INLINE void input_params_set(struct flb_thread *th,
+static FLB_INLINE void input_params_set(struct flb_coro *coro,
                              struct flb_input_collector *coll,
                              struct flb_config *config,
                              void *context)
@@ -365,47 +375,56 @@ static FLB_INLINE void input_params_set(struct flb_thread *th,
     /* Set callback parameters */
     libco_in_param.coll    = coll;
     libco_in_param.config  = config;
-    libco_in_param.th      = th;
-    co_switch(th->callee);
+    libco_in_param.coro    = coro;
+    co_switch(coro->callee);
 }
 
 static FLB_INLINE void input_pre_cb_collect(void)
 {
     struct flb_input_collector *coll = libco_in_param.coll;
     struct flb_config *config = libco_in_param.config;
-    struct flb_thread *th     = libco_in_param.th;
+    struct flb_coro *coro     = libco_in_param.coro;
 
-    co_switch(th->caller);
+    co_switch(coro->caller);
     coll->cb_collect(coll->instance, config, coll->instance->context);
 }
 
+static FLB_INLINE void flb_input_coro_resume(struct flb_input_coro *input_coro)
+{
+    flb_coro_resume(input_coro->coro);
+}
+
 static FLB_INLINE
-struct flb_thread *flb_input_thread_collect(struct flb_input_collector *coll,
-                                            struct flb_config *config)
+struct flb_input_coro *flb_input_coro_collect(struct flb_input_collector *coll,
+                                              struct flb_config *config)
 {
     size_t stack_size;
-    struct flb_thread *th;
+    struct flb_coro *coro;
+    struct flb_input_coro *input_coro;
 
-    th = flb_input_thread(coll->instance, config);
-    if (!th) {
+    input_coro = flb_input_coro_create(coll->instance, config);
+    if (!input_coro) {
         return NULL;
     }
 
-    th->caller = co_active();
-    th->callee = co_create(config->coro_stack_size,
-                           input_pre_cb_collect, &stack_size);
+    coro = input_coro->coro;
+    if (!coro) {
+        return NULL;
+    }
+
+    coro->caller = co_active();
+    coro->callee = co_create(config->coro_stack_size,
+                             input_pre_cb_collect, &stack_size);
 
 #ifdef FLB_HAVE_VALGRIND
-    th->valgrind_stack_id = VALGRIND_STACK_REGISTER(th->callee,
-                                                    ((char *)th->callee) + stack_size);
+    coro->valgrind_stack_id = VALGRIND_STACK_REGISTER(coro->callee,
+                                                      ((char *)coro->callee) + stack_size);
 #endif
 
     /* Set parameters */
-    input_params_set(th, coll, config, coll->instance->context);
-    return th;
+    input_params_set(coro, coll, config, coll->instance->context);
+    return input_coro;
 }
-
-#endif
 
 /*
  * This function is used by the output plugins to return. It's mandatory
@@ -419,93 +438,120 @@ struct flb_thread *flb_input_thread_collect(struct flb_input_collector *coll,
  * number of retries, if it have exceed the 'retry_limit' option, a FLB_ERROR
  * will be returned instead.
  */
-static inline void flb_input_return(struct flb_thread *th) {
+static inline void flb_input_return(struct flb_coro *coro) {
     int n;
     uint64_t val;
-    struct flb_input_thread *in_th;
+    struct flb_input_coro *input_coro;
+    struct flb_input_instance *ins;
 
-    in_th = (struct flb_input_thread *) FLB_THREAD_DATA(th);
+    input_coro = (struct flb_input_coro *) coro->data;
+    ins = input_coro->ins;
 
     /*
-     * To compose the signal event the relevant info is:
-     *
-     * - Unique Task events id: 2 in this case
-     * - Return value: FLB_OK (0) or FLB_ERROR (1)
-     * - Task ID
-     *
-     * We put together the return value with the task_id on the 32 bits at right
+     * Message the event loop by identifying the message comming from an input
+     * coroutine and passing the input plugin ID that triggered the event.
      */
-    val = FLB_BITS_U64_SET(3 /* FLB_ENGINE_IN_THREAD */, in_th->id);
-    n = flb_pipe_w(in_th->config->ch_manager[1], (void *) &val, sizeof(val));
+    val = FLB_BITS_U64_SET(FLB_ENGINE_IN_CORO, ins->id);
+    n = flb_pipe_w(ins->ch_events[1], (void *) &val, sizeof(val));
     if (n == -1) {
         flb_errno();
     }
+
+    flb_input_coro_prepare_destroy(input_coro);
 }
+
+static inline void flb_input_return_do(int ret) {
+    struct flb_coro *coro = flb_coro_get();
+
+    flb_input_return(coro);
+    flb_coro_yield(coro, FLB_TRUE);
+}
+
+#define FLB_INPUT_RETURN(x) \
+    flb_input_return_do(x); \
+    return x;
 
 static inline int flb_input_buf_paused(struct flb_input_instance *i)
 {
     if (i->mem_buf_status == FLB_INPUT_PAUSED) {
         return FLB_TRUE;
     }
+    if (i->storage_buf_status == FLB_INPUT_PAUSED) {
+        return FLB_TRUE;
+    }
 
     return FLB_FALSE;
 }
 
-static inline void FLB_INPUT_RETURN()
+static inline int flb_input_config_map_set(struct flb_input_instance *ins,
+                                           void *context)
 {
-    struct flb_thread *th;
-    th = (struct flb_thread *) pthread_getspecific(flb_thread_key);
-    flb_input_return(th);
-    flb_thread_return(th);
+    return flb_config_map_set(&ins->properties, ins->config_map, context);
 }
 
 int flb_input_register_all(struct flb_config *config);
 struct flb_input_instance *flb_input_new(struct flb_config *config,
                                          const char *input, void *data,
                                          int public_only);
-int flb_input_set_property(struct flb_input_instance *in,
+struct flb_input_instance *flb_input_get_instance(struct flb_config *config,
+                                                  int ins_id);
+
+int flb_input_set_property(struct flb_input_instance *ins,
                            const char *k, const char *v);
-const char *flb_input_get_property(const char *key, struct flb_input_instance *i);
+const char *flb_input_get_property(const char *key,
+                                   struct flb_input_instance *ins);
 
 int flb_input_check(struct flb_config *config);
-void flb_input_set_context(struct flb_input_instance *in, void *context);
-int flb_input_channel_init(struct flb_input_instance *in);
+void flb_input_set_context(struct flb_input_instance *ins, void *context);
+int flb_input_channel_init(struct flb_input_instance *ins);
 
-int flb_input_collector_start(int coll_id, struct flb_input_instance *in);
+
+int flb_input_collector_start(int coll_id, struct flb_input_instance *ins);
 int flb_input_collectors_start(struct flb_config *config);
-int flb_input_collector_pause(int coll_id, struct flb_input_instance *in);
-int flb_input_collector_resume(int coll_id, struct flb_input_instance *in);
+int flb_input_collector_pause(int coll_id, struct flb_input_instance *ins);
+int flb_input_collector_resume(int coll_id, struct flb_input_instance *ins);
+int flb_input_collector_delete(int coll_id, struct flb_input_instance *ins);
 int flb_input_collector_fd(flb_pipefd_t fd, struct flb_config *config);
-int flb_input_set_collector_time(struct flb_input_instance *in,
+int flb_input_set_collector_time(struct flb_input_instance *ins,
                                  int (*cb_collect) (struct flb_input_instance *,
                                                     struct flb_config *, void *),
                                  time_t seconds,
                                  long   nanoseconds,
                                  struct flb_config *config);
-int flb_input_set_collector_event(struct flb_input_instance *in,
+int flb_input_set_collector_event(struct flb_input_instance *ins,
                                   int (*cb_collect) (struct flb_input_instance *,
                                                      struct flb_config *, void *),
                                   flb_pipefd_t fd,
                                   struct flb_config *config);
-int flb_input_set_collector_socket(struct flb_input_instance *in,
+int flb_input_set_collector_socket(struct flb_input_instance *ins,
                                    int (*cb_new_connection) (struct flb_input_instance *,
                                                              struct flb_config *,
                                                              void*),
                                    flb_pipefd_t fd,
                                    struct flb_config *config);
-int flb_input_collector_running(int coll_id, struct flb_input_instance *in);
-int flb_input_instance_init(struct flb_input_instance *in,
-                            struct flb_config *config);
-void flb_input_instance_exit(struct flb_input_instance *in,
-                             struct flb_config *config);
-void flb_input_instance_free(struct flb_input_instance *in);
+int flb_input_collector_running(int coll_id, struct flb_input_instance *ins);
+int flb_input_coro_id_get(struct flb_input_instance *ins);
+int flb_input_coro_finished(struct flb_config *config, int ins_id);
 
-void flb_input_initialize_all(struct flb_config *config);
+int flb_input_instance_init(struct flb_input_instance *ins,
+                            struct flb_config *config);
+void flb_input_instance_exit(struct flb_input_instance *ins,
+                             struct flb_config *config);
+void flb_input_instance_destroy(struct flb_input_instance *ins);
+
+int flb_input_init_all(struct flb_config *config);
 void flb_input_pre_run_all(struct flb_config *config);
 void flb_input_exit_all(struct flb_config *config);
 
-void *flb_input_flush(struct flb_input_instance *i_ins, size_t *size);
+void *flb_input_flush(struct flb_input_instance *ins, size_t *size);
 int flb_input_pause_all(struct flb_config *config);
-const char *flb_input_name(struct flb_input_instance *in);
+const char *flb_input_name(struct flb_input_instance *ins);
+int flb_input_name_exists(const char *name, struct flb_config *config);
+
+void flb_input_net_default_listener(const char *listen, int port,
+                                    struct flb_input_instance *ins);
+
+int flb_input_event_type_is_metric(struct flb_input_instance *ins);
+int flb_input_event_type_is_log(struct flb_input_instance *ins);
 
 #endif

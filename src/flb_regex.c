@@ -2,8 +2,7 @@
 
 /*  Fluent Bit
  *  ==========
- *  Copyright (C) 2019      The Fluent Bit Authors
- *  Copyright (C) 2015-2018 Treasure Data Inc.
+ *  Copyright (C) 2015-2022 The Fluent Bit Authors
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -21,10 +20,10 @@
 #include <fluent-bit/flb_info.h>
 #include <fluent-bit/flb_regex.h>
 #include <fluent-bit/flb_log.h>
+#include <fluent-bit/flb_mem.h>
 
 #include <string.h>
 #include <onigmo.h>
-
 
 static int
 cb_onig_named(const UChar *name, const UChar *name_end,
@@ -98,15 +97,16 @@ struct flb_regex *flb_regex_create(const char *pattern)
     struct flb_regex *r;
 
     /* Create context */
-    r = malloc(sizeof(struct flb_regex));
+    r = flb_malloc(sizeof(struct flb_regex));
     if (!r) {
+        flb_errno();
         return NULL;
     }
 
     /* Compile pattern */
-    ret = str_to_regex(pattern, &r->regex);
+    ret = str_to_regex(pattern, (OnigRegex *) &r->regex);
     if (ret == -1) {
-        free(r);
+        flb_free(r);
         return NULL;
     }
 
@@ -124,6 +124,8 @@ ssize_t flb_regex_do(struct flb_regex *r, const char *str, size_t slen,
 
     region = onig_region_new();
     if (!region) {
+        flb_errno();
+        result->region = NULL;
         return -1;
     }
 
@@ -139,10 +141,12 @@ ssize_t flb_regex_do(struct flb_regex *r, const char *str, size_t slen,
                       (const unsigned char *)range,
                       region, ONIG_OPTION_NONE);
     if (ret == ONIG_MISMATCH) {
+        result->region = NULL;
         onig_region_free(region, 1);
         return -1;
     }
     else if (ret < 0) {
+        result->region = NULL;
         onig_region_free(region, 1);
         return -1;
     }
@@ -159,6 +163,67 @@ ssize_t flb_regex_do(struct flb_regex *r, const char *str, size_t slen,
 
     return ret;
 }
+
+int flb_regex_results_get(struct flb_regex_search *result, int i,
+                          ptrdiff_t *start, ptrdiff_t *end)
+{
+    OnigRegion *region;
+
+    region = (OnigRegion *) result->region;
+    if (!region) {
+        return -1;
+    }
+
+    if (i >= region->num_regs) {
+        return -1;
+    }
+
+    *start = region->beg[i];
+    *end = region->end[i];
+
+    return 0;
+}
+
+void flb_regex_results_release(struct flb_regex_search *result)
+{
+    onig_region_free(result->region, 1);
+}
+
+int flb_regex_results_size(struct flb_regex_search *result)
+{
+    OnigRegion *region;
+
+    region = (OnigRegion *) result->region;
+    if (!region) {
+        return -1;
+    }
+
+    return region->num_regs;
+}
+
+int flb_regex_match(struct flb_regex *r, unsigned char *str, size_t slen)
+{
+    int ret;
+    unsigned char *start;
+    unsigned char *end;
+    unsigned char *range;
+
+    /* Search scope */
+    start = (unsigned char *) str;
+    end   = start + slen;
+    range = end;
+
+    ret = onig_search(r->regex, str, end, start, range, NULL, ONIG_OPTION_NONE);
+
+    if (ret == ONIG_MISMATCH) {
+        return 0;
+    }
+    else if (ret < 0) {
+        return ret;
+    }
+    return 1;
+}
+
 
 int flb_regex_parse(struct flb_regex *r, struct flb_regex_search *result,
                     void (*cb_match) (const char *,          /* name  */
@@ -184,7 +249,7 @@ int flb_regex_parse(struct flb_regex *r, struct flb_regex_search *result,
 int flb_regex_destroy(struct flb_regex *r)
 {
     onig_free(r->regex);
-    free(r);
+    flb_free(r);
     return 0;
 }
 

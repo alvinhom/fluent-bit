@@ -36,6 +36,8 @@ static int cb_check_result(void *record, size_t size, void *data)
     return 0;
 }
 
+
+
 static struct filter_test *filter_test_create(struct flb_lib_out_cb *data)
 {
     int i_ffd;
@@ -81,7 +83,7 @@ static struct filter_test *filter_test_create(struct flb_lib_out_cb *data)
 
 static void filter_test_destroy(struct filter_test *ctx)
 {
-    sleep(0.2);
+    sleep(1);
     flb_stop(ctx->flb);
     flb_destroy(ctx->flb);
     flb_free(ctx);
@@ -235,7 +237,7 @@ static void flb_test_op_remove_wildcard()
     TEST_CHECK(ret == 0);
 
     /* Ingest data samples */
-    p = "[0, {\"k1\":\"sample1\",\"k2\":\"sample2\",\"a3\":\"sample3\"}]";
+    p = "[0,{\"k1\":\"sample1\",\"k2\":\"sample2\",\"a3\":\"sample3\"}]";
     len = strlen(p);
     bytes = flb_lib_push(ctx->flb, ctx->i_ffd, p, len);
     TEST_CHECK(bytes == len);
@@ -274,7 +276,7 @@ static void flb_test_op_remove_regex()
     TEST_CHECK(ret == 0);
 
     /* Ingest data samples */
-    p = "[0, {\"k1\":\"sample1\",\"k2\":\"sample2\",\"A3\":\"sample3\"}]";
+    p = "[0,{\"k1\":\"sample1\",\"k2\":\"sample2\",\"A3\":\"sample3\"}]";
     len = strlen(p);
     bytes = flb_lib_push(ctx->flb, ctx->i_ffd, p, len);
     TEST_CHECK(bytes == len);
@@ -309,14 +311,14 @@ static void flb_test_op_rename_exists()
 
     /* Prepare output callback with expected result */
     cb_data.cb = cb_check_result;
-    cb_data.data = "\"k1\":\"sample1\", \"k2\":\"sample2\", \"A3\":\"sample3\"";
+    cb_data.data = "\"k1\":\"sample1\",\"k2\":\"sample2\",\"A3\":\"sample3\"";
 
     /* Start the engine */
     ret = flb_start(ctx->flb);
     TEST_CHECK(ret == 0);
 
     /* Ingest data samples */
-    p = "[0, {\"k1\":\"sample1\",\"k2\":\"sample2\",\"A3\":\"sample3\"}]";
+    p = "[0,{\"k1\":\"sample1\",\"k2\":\"sample2\",\"A3\":\"sample3\"}]";
     len = strlen(p);
     bytes = flb_lib_push(ctx->flb, ctx->i_ffd, p, len);
     TEST_CHECK(bytes == len);
@@ -348,13 +350,13 @@ static void flb_test_op_rename_no_exists()
 
     /* Prepare output callback with expected result */
     cb_data.cb = cb_check_result;
-    cb_data.data = "\"k1\":\"sample1\", \"k2\":\"sample2\", \"a3\":\"sample3\"";
+    cb_data.data = "\"k1\":\"sample1\",\"k2\":\"sample2\",\"a3\":\"sample3\"";
     /* Start the engine */
     ret = flb_start(ctx->flb);
     TEST_CHECK(ret == 0);
 
     /* Ingest data samples */
-    p = "[0, {\"k1\":\"sample1\",\"k2\":\"sample2\",\"A3\":\"sample3\"}]";
+    p = "[0,{\"k1\":\"sample1\",\"k2\":\"sample2\",\"A3\":\"sample3\"}]";
     len = strlen(p);
     bytes = flb_lib_push(ctx->flb, ctx->i_ffd, p, len);
     TEST_CHECK(bytes == len);
@@ -396,7 +398,7 @@ static void flb_test_op_hard_rename_exists()
     TEST_CHECK(ret == 0);
 
     /* Ingest data samples */
-    p = "[0, {\"k1\":\"sample1\",\"k2\":\"sample2\"}]";
+    p = "[0,{\"k1\":\"sample1\",\"k2\":\"sample2\"}]";
     len = strlen(p);
     bytes = flb_lib_push(ctx->flb, ctx->i_ffd, p, len);
     TEST_CHECK(bytes == len);
@@ -435,7 +437,7 @@ static void flb_test_op_hard_rename_no_exists()
     TEST_CHECK(ret == 0);
 
     /* Ingest data samples */
-    p = "[0, {\"k1\":\"sample1\",\"k2\":\"sample2\"}]";
+    p = "[0,{\"k1\":\"sample1\",\"k2\":\"sample2\"}]";
     len = strlen(p);
     bytes = flb_lib_push(ctx->flb, ctx->i_ffd, p, len);
     TEST_CHECK(bytes == len);
@@ -467,14 +469,14 @@ static void flb_test_op_copy_exists()
 
     /* Prepare output callback with expected result */
     cb_data.cb = cb_check_result;
-    cb_data.data = "\"k1\":\"sample1\", \"k2\":\"sample2\"";
+    cb_data.data = "\"k1\":\"sample1\",\"k2\":\"sample2\"";
 
     /* Start the engine */
     ret = flb_start(ctx->flb);
     TEST_CHECK(ret == 0);
 
     /* Ingest data samples */
-    p = "[0, {\"k1\":\"sample1\",\"k2\":\"sample2\"}]";
+    p = "[0,{\"k1\":\"sample1\",\"k2\":\"sample2\"}]";
     len = strlen(p);
     bytes = flb_lib_push(ctx->flb, ctx->i_ffd, p, len);
     TEST_CHECK(bytes == len);
@@ -513,7 +515,7 @@ static void flb_test_op_copy_no_exists()
     TEST_CHECK(ret == 0);
 
     /* Ingest data samples */
-    p = "[0, {\"k1\":\"sample1\",\"k2\":\"sample2\"}]";
+    p = "[0,{\"k1\":\"sample1\",\"k2\":\"sample2\"}]";
     len = strlen(p);
     bytes = flb_lib_push(ctx->flb, ctx->i_ffd, p, len);
     TEST_CHECK(bytes == len);
@@ -545,7 +547,7 @@ static void flb_test_op_hard_copy_exists()
 
     /* Prepare output callback with expected result */
     cb_data.cb = cb_check_result;
-    cb_data.data = "\"k1\":\"sample1\", \"k2\":\"sample1\"";
+    cb_data.data = "\"k1\":\"sample1\",\"k2\":\"sample1\"";
 
     /* Start the engine */
     ret = flb_start(ctx->flb);
@@ -591,7 +593,7 @@ static void flb_test_op_hard_copy_no_exists()
     TEST_CHECK(ret == 0);
 
     /* Ingest data samples */
-    p = "[0, {\"k1\":\"sample1\",\"k2\":\"sample2\"}]";
+    p = "[0,{\"k1\":\"sample1\",\"k2\":\"sample2\"}]";
     len = strlen(p);
     bytes = flb_lib_push(ctx->flb, ctx->i_ffd, p, len);
     TEST_CHECK(bytes == len);
@@ -632,7 +634,47 @@ static void flb_test_cond_key_exists()
     TEST_CHECK(ret == 0);
 
     /* Ingest data samples */
-    p = "[0, {\"k1\":\"sample1\",\"k2\":\"sample2\"}]";
+    p = "[0,{\"k1\":\"sample1\",\"k2\":\"sample2\"}]";
+    len = strlen(p);
+    bytes = flb_lib_push(ctx->flb, ctx->i_ffd, p, len);
+    TEST_CHECK(bytes == len);
+
+    filter_test_destroy(ctx);
+}
+
+/* Condition: KEY_EXISTS / If nested key exists, make a copy */
+static void flb_test_cond_key_exists_nest()
+{
+    int len;
+    int ret;
+    int bytes;
+    char *p;
+    struct flb_lib_out_cb cb_data;
+    struct filter_test *ctx;
+
+    /* Create test context */
+    ctx = filter_test_create((void *) &cb_data);
+    if (!ctx) {
+        exit(EXIT_FAILURE);
+    }
+
+    /* Configure filter */
+    ret = flb_filter_set(ctx->flb, ctx->f_ffd,
+                         "condition", "key_exists $nest['k1']",
+                         "add", "key found",
+                         NULL);
+    TEST_CHECK(ret == 0);
+
+    /* Prepare output callback with expected result */
+    cb_data.cb = cb_check_result;
+    cb_data.data = "\"key\":\"found\"";
+
+    /* Start the engine */
+    ret = flb_start(ctx->flb);
+    TEST_CHECK(ret == 0);
+
+    /* Ingest data samples */
+    p = "[0,{\"k1\":\"sample1\",\"k2\":\"sample2\", \"nest\":{\"k1\":\"nest\"}}]";
     len = strlen(p);
     bytes = flb_lib_push(ctx->flb, ctx->i_ffd, p, len);
     TEST_CHECK(bytes == len);
@@ -672,7 +714,47 @@ static void flb_test_cond_key_does_not_exist()
     TEST_CHECK(ret == 0);
 
     /* Ingest data samples */
-    p = "[0, {\"k1\":\"sample1\",\"k2\":\"sample2\"}]";
+    p = "[0,{\"k1\":\"sample1\",\"k2\":\"sample2\"}]";
+    len = strlen(p);
+    bytes = flb_lib_push(ctx->flb, ctx->i_ffd, p, len);
+    TEST_CHECK(bytes == len);
+
+    filter_test_destroy(ctx);
+}
+
+/* Condition: KEY_DOES_NOT_EXISTS / If key does not exists, add a dummy key */
+static void flb_test_cond_key_does_not_exist_nest()
+{
+    int len;
+    int ret;
+    int bytes;
+    char *p;
+    struct flb_lib_out_cb cb_data;
+    struct filter_test *ctx;
+
+    /* Create test context */
+    ctx = filter_test_create((void *) &cb_data);
+    if (!ctx) {
+        exit(EXIT_FAILURE);
+    }
+
+    /* Configure filter */
+    ret = flb_filter_set(ctx->flb, ctx->f_ffd,
+                         "condition", "key_does_not_exist $nest['k1']",
+                         "add", "key not_found",
+                         NULL);
+    TEST_CHECK(ret == 0);
+
+    /* Prepare output callback with expected result */
+    cb_data.cb = cb_check_result;
+    cb_data.data = "\"key\":\"not_found\"";
+
+    /* Start the engine */
+    ret = flb_start(ctx->flb);
+    TEST_CHECK(ret == 0);
+
+    /* Ingest data samples */
+    p = "[0,{\"k1\":\"sample1\",\"k2\":\"sample2\", \"nest\":{\"k\":\"sample\"}}]";
     len = strlen(p);
     bytes = flb_lib_push(ctx->flb, ctx->i_ffd, p, len);
     TEST_CHECK(bytes == len);
@@ -712,7 +794,7 @@ static void flb_test_cond_a_key_matches()
     TEST_CHECK(ret == 0);
 
     /* Ingest data samples */
-    p = "[0, {\"aa\":\"sample1\",\"bb\":\"sample2\",\"c1\":\"sample3\"}]";
+    p = "[0,{\"aa\":\"sample1\",\"bb\":\"sample2\",\"c1\":\"sample3\"}]";
     len = strlen(p);
     bytes = flb_lib_push(ctx->flb, ctx->i_ffd, p, len);
     TEST_CHECK(bytes == len);
@@ -752,7 +834,7 @@ static void flb_test_cond_no_key_matches()
     TEST_CHECK(ret == 0);
 
     /* Ingest data samples */
-    p = "[0, {\"aa\":\"sample1\",\"bb\":\"sample2\",\"c1\":\"sample3\"}]";
+    p = "[0,{\"aa\":\"sample1\",\"bb\":\"sample2\",\"c1\":\"sample3\"}]";
     len = strlen(p);
     bytes = flb_lib_push(ctx->flb, ctx->i_ffd, p, len);
     TEST_CHECK(bytes == len);
@@ -792,7 +874,47 @@ static void flb_test_cond_key_value_equals()
     TEST_CHECK(ret == 0);
 
     /* Ingest data samples */
-    p = "[0, {\"aa\":\"sample1\",\"bb\":\"sample2\",\"c1\":\"sample3\"}]";
+    p = "[0,{\"aa\":\"sample1\",\"bb\":\"sample2\",\"c1\":\"sample3\"}]";
+    len = strlen(p);
+    bytes = flb_lib_push(ctx->flb, ctx->i_ffd, p, len);
+    TEST_CHECK(bytes == len);
+
+    filter_test_destroy(ctx);
+}
+
+/* Condition: KEY_VALUE_EQUALS / If key value matches, add a dummy key */
+static void flb_test_cond_key_value_equals_nest()
+{
+    int len;
+    int ret;
+    int bytes;
+    char *p;
+    struct flb_lib_out_cb cb_data;
+    struct filter_test *ctx;
+
+    /* Create test context */
+    ctx = filter_test_create((void *) &cb_data);
+    if (!ctx) {
+        exit(EXIT_FAILURE);
+    }
+
+    /* Configure filter */
+    ret = flb_filter_set(ctx->flb, ctx->f_ffd,
+                         "condition", "key_value_equals $nest['k1'] sample2",
+                         "add", "key found",
+                         NULL);
+    TEST_CHECK(ret == 0);
+
+    /* Prepare output callback with expected result */
+    cb_data.cb = cb_check_result;
+    cb_data.data = "\"key\":\"found\"";
+
+    /* Start the engine */
+    ret = flb_start(ctx->flb);
+    TEST_CHECK(ret == 0);
+
+    /* Ingest data samples */
+    p = "[0,{\"aa\":\"sample1\",\"bb\":\"sample2\",\"c1\":\"sample3\", \"nest\":{\"k1\":\"sample2\"}}]";
     len = strlen(p);
     bytes = flb_lib_push(ctx->flb, ctx->i_ffd, p, len);
     TEST_CHECK(bytes == len);
@@ -832,7 +954,47 @@ static void flb_test_cond_key_value_does_not_equal()
     TEST_CHECK(ret == 0);
 
     /* Ingest data samples */
-    p = "[0, {\"aa\":\"sample1\",\"bb\":\"sample2\",\"c1\":\"sample3\"}]";
+    p = "[0,{\"aa\":\"sample1\",\"bb\":\"sample2\",\"c1\":\"sample3\"}]";
+    len = strlen(p);
+    bytes = flb_lib_push(ctx->flb, ctx->i_ffd, p, len);
+    TEST_CHECK(bytes == len);
+
+    filter_test_destroy(ctx);
+}
+
+/* Condition: KEY_VALUE_DOES_NOT_EQUAL / If key value mismatch, add a key */
+static void flb_test_cond_key_value_does_not_equal_nest()
+{
+    int len;
+    int ret;
+    int bytes;
+    char *p;
+    struct flb_lib_out_cb cb_data;
+    struct filter_test *ctx;
+
+    /* Create test context */
+    ctx = filter_test_create((void *) &cb_data);
+    if (!ctx) {
+        exit(EXIT_FAILURE);
+    }
+
+    /* Configure filter */
+    ret = flb_filter_set(ctx->flb, ctx->f_ffd,
+                         "condition", "key_value_does_not_equal $nest['k1'] sample2",
+                         "add", "key not_found",
+                         NULL);
+    TEST_CHECK(ret == 0);
+
+    /* Prepare output callback with expected result */
+    cb_data.cb = cb_check_result;
+    cb_data.data = "\"key\":\"not_found\"";
+
+    /* Start the engine */
+    ret = flb_start(ctx->flb);
+    TEST_CHECK(ret == 0);
+
+    /* Ingest data samples */
+    p = "[0,{\"aa\":\"sample1\",\"bb\":\"sample2\",\"c1\":\"sample3\", \"nest\":{\"k1\":\"sample3\"}}]";
     len = strlen(p);
     bytes = flb_lib_push(ctx->flb, ctx->i_ffd, p, len);
     TEST_CHECK(bytes == len);
@@ -872,7 +1034,47 @@ static void flb_test_cond_key_value_matches()
     TEST_CHECK(ret == 0);
 
     /* Ingest data samples */
-    p = "[0, {\"k1\":\"sample1\",\"k2\":\"z2\"}]";
+    p = "[0,{\"k1\":\"sample1\",\"k2\":\"z2\"}]";
+    len = strlen(p);
+    bytes = flb_lib_push(ctx->flb, ctx->i_ffd, p, len);
+    TEST_CHECK(bytes == len);
+
+    filter_test_destroy(ctx);
+}
+
+/* Condition: KEY_VALUE_MATCHES / If key match, add a key */
+static void flb_test_cond_key_value_matches_nest()
+{
+    int len;
+    int ret;
+    int bytes;
+    char *p;
+    struct flb_lib_out_cb cb_data;
+    struct filter_test *ctx;
+
+    /* Create test context */
+    ctx = filter_test_create((void *) &cb_data);
+    if (!ctx) {
+        exit(EXIT_FAILURE);
+    }
+
+    /* Configure filter */
+    ret = flb_filter_set(ctx->flb, ctx->f_ffd,
+                         "condition", "key_value_matches $nest['k2'] ^[a-z][0-9]$",
+                         "add", "kv matches",
+                         NULL);
+    TEST_CHECK(ret == 0);
+
+    /* Prepare output callback with expected result */
+    cb_data.cb = cb_check_result;
+    cb_data.data = "\"kv\":\"matches\"";
+
+    /* Start the engine */
+    ret = flb_start(ctx->flb);
+    TEST_CHECK(ret == 0);
+
+    /* Ingest data samples */
+    p = "[0,{\"k1\":\"sample1\",\"k2\":\"z2\", \"nest\":{\"k2\":\"z2\"}}]";
     len = strlen(p);
     bytes = flb_lib_push(ctx->flb, ctx->i_ffd, p, len);
     TEST_CHECK(bytes == len);
@@ -912,7 +1114,47 @@ static void flb_test_cond_key_value_does_not_match()
     TEST_CHECK(ret == 0);
 
     /* Ingest data samples */
-    p = "[0, {\"k1\":\"sample1\",\"k2\":\"22\"}]";
+    p = "[0,{\"k1\":\"sample1\",\"k2\":\"22\"}]";
+    len = strlen(p);
+    bytes = flb_lib_push(ctx->flb, ctx->i_ffd, p, len);
+    TEST_CHECK(bytes == len);
+
+    filter_test_destroy(ctx);
+}
+
+/* Condition: KEY_VALUE_DOES_NOT_MATCH / If key mismatch, add a key */
+static void flb_test_cond_key_value_does_not_match_nest()
+{
+    int len;
+    int ret;
+    int bytes;
+    char *p;
+    struct flb_lib_out_cb cb_data;
+    struct filter_test *ctx;
+
+    /* Create test context */
+    ctx = filter_test_create((void *) &cb_data);
+    if (!ctx) {
+        exit(EXIT_FAILURE);
+    }
+
+    /* Configure filter */
+    ret = flb_filter_set(ctx->flb, ctx->f_ffd,
+                         "condition", "key_value_does_not_match $nest['k2'] ^[a-z][0-9]$",
+                         "add", "kv no_matches",
+                         NULL);
+    TEST_CHECK(ret == 0);
+
+    /* Prepare output callback with expected result */
+    cb_data.cb = cb_check_result;
+    cb_data.data = "\"kv\":\"no_matches\"";
+
+    /* Start the engine */
+    ret = flb_start(ctx->flb);
+    TEST_CHECK(ret == 0);
+
+    /* Ingest data samples */
+    p = "[0,{\"k1\":\"sample1\",\"k2\":\"22\",\"nest\":{\"k2\":\"22\"}}]";
     len = strlen(p);
     bytes = flb_lib_push(ctx->flb, ctx->i_ffd, p, len);
     TEST_CHECK(bytes == len);
@@ -954,7 +1196,7 @@ static void flb_test_cond_matching_keys_have_matching_values()
     TEST_CHECK(ret == 0);
 
     /* Ingest data samples */
-    p = "[0, {\"k1\":\"n1\",\"k2\":\"n3\"}]";
+    p = "[0,{\"k1\":\"n1\",\"k2\":\"n3\"}]";
     len = strlen(p);
     bytes = flb_lib_push(ctx->flb, ctx->i_ffd, p, len);
     TEST_CHECK(bytes == len);
@@ -996,7 +1238,7 @@ static void flb_test_cond_matching_keys_do_not_have_matching_values()
     TEST_CHECK(ret == 0);
 
     /* Ingest data samples */
-    p = "[0, {\"k1\":\"aa\",\"k2\":\"bb\"}]";
+    p = "[0,{\"k1\":\"aa\",\"k2\":\"bb\"}]";
     len = strlen(p);
     bytes = flb_lib_push(ctx->flb, ctx->i_ffd, p, len);
     TEST_CHECK(bytes == len);
@@ -1055,10 +1297,208 @@ static void flb_test_cond_chain()
     TEST_CHECK(ret == 0);
 
     /* Ingest data samples */
-    p = "[0, {\"k1\":\"sample\"}]";
+    p = "[0,{\"k1\":\"sample\"}]";
     len = strlen(p);
     bytes = flb_lib_push(ctx->flb, ctx->i_ffd, p, len);
     TEST_CHECK(bytes == len);
+
+    filter_test_destroy(ctx);
+}
+
+
+pthread_mutex_t result_mutex = PTHREAD_MUTEX_INITIALIZER;
+int  num_output = 0;
+
+
+static void add_output_num()
+{
+    pthread_mutex_lock(&result_mutex);
+    num_output++;
+    pthread_mutex_unlock(&result_mutex);
+}
+
+static void clear_output_num()
+{
+    pthread_mutex_lock(&result_mutex);
+    num_output = 0;
+    pthread_mutex_unlock(&result_mutex);
+}
+
+static int get_output_num()
+{
+    int ret;
+    pthread_mutex_lock(&result_mutex);
+    ret = num_output;
+    pthread_mutex_unlock(&result_mutex);
+
+    return ret;
+}
+
+static int callback_count(void* data, size_t size, void* cb_data)
+{
+    if (size > 0) {
+        flb_debug("[test_filter_modify] received message: %s", data);
+        add_output_num(); /* success */
+    }
+    return 0;
+}
+
+
+// to check issue https://github.com/fluent/fluent-bit/issues/1077
+static void flb_test_not_drop_multi_event()
+{
+    int count = 0;
+    int expected = 3;
+
+    char *p;
+    int len;
+    int ret;
+    int bytes;
+
+    struct filter_test *ctx;
+    struct flb_lib_out_cb cb_data;
+
+
+    clear_output_num();
+    cb_data.cb = callback_count;
+
+    /* Create test context */
+    ctx = filter_test_create((void *) &cb_data);
+    if (!ctx) {
+        exit(EXIT_FAILURE);
+    }
+
+    /* Configure filter */
+    ret = flb_filter_set(ctx->flb, ctx->f_ffd,
+                         "condition", "key_value_equals cond true",
+                         "add", "data matched",
+                         NULL);
+    TEST_CHECK(ret == 0);
+
+        /* Start the engine */
+    ret = flb_start(ctx->flb);
+    TEST_CHECK(ret == 0);
+
+    /* Ingest multiple events */
+    p = "[0, {\"cond\":\"false\", \"data\": \"something\"}]";
+    len = strlen(p);
+    bytes = flb_lib_push(ctx->flb, ctx->i_ffd, p, len);
+    TEST_CHECK(bytes == len);
+
+    p = "[0, {\"cond\":\"true\", \"data\": \"something\"}]";
+    len = strlen(p);
+    bytes = flb_lib_push(ctx->flb, ctx->i_ffd, p, len);
+    TEST_CHECK(bytes == len);
+
+    p = "[0, {\"data\": \"something\"}]";
+    len = strlen(p);
+    bytes = flb_lib_push(ctx->flb, ctx->i_ffd, p, len);
+    TEST_CHECK(bytes == len);
+
+    sleep(1); /* waiting flush */
+    count = get_output_num();
+
+    TEST_CHECK_(count == expected, "Expected number of events %d, got %d", expected, count );
+
+
+    filter_test_destroy(ctx);
+
+}
+
+/* to check issue https://github.com/fluent/fluent-bit/issues/4319 */
+static void flb_test_issue_4319()
+{
+    char *p;
+    int len;
+    int ret;
+    int bytes;
+
+    struct filter_test *ctx;
+    struct flb_lib_out_cb cb_data;
+
+
+    clear_output_num();
+
+    /* Prepare output callback with expected result */
+    cb_data.cb = cb_check_result;
+    cb_data.data = "\"ok\":\"sample\"";
+
+    /* Create test context */
+    ctx = filter_test_create((void *) &cb_data);
+    if (!ctx) {
+        exit(EXIT_FAILURE);
+    }
+
+    /* Configure filter */
+    ret = flb_filter_set(ctx->flb, ctx->f_ffd,
+                         /* set key which doesn't exist */
+                         "condition", "key_value_does_not_equal aaa sample",
+                         "rename", "ok error",
+                         NULL);
+    TEST_CHECK(ret == 0);
+
+        /* Start the engine */
+    ret = flb_start(ctx->flb);
+    TEST_CHECK(ret == 0);
+
+    /* Ingest event */
+    p = "[0, {\"ok\":\"sample\"}]";
+    len = strlen(p);
+    bytes = flb_lib_push(ctx->flb, ctx->i_ffd, p, len);
+    TEST_CHECK(bytes == len);
+
+    sleep(1); /* waiting flush */
+
+    filter_test_destroy(ctx);
+}
+
+
+/* 
+ * to check issue https://github.com/fluent/fluent-bit/issues/4319
+   Key_value_does_not_match case
+*/
+static void flb_test_issue_4319_2()
+{
+    char *p;
+    int len;
+    int ret;
+    int bytes;
+
+    struct filter_test *ctx;
+    struct flb_lib_out_cb cb_data;
+
+
+    clear_output_num();
+
+    /* Prepare output callback with expected result */
+    cb_data.cb = cb_check_result;
+    cb_data.data = "\"ok\":\"sample\"";
+
+    /* Create test context */
+    ctx = filter_test_create((void *) &cb_data);
+    if (!ctx) {
+        exit(EXIT_FAILURE);
+    }
+
+    /* Configure filter */
+    ret = flb_filter_set(ctx->flb, ctx->f_ffd,
+                         /* set key which doesn't exist */
+                         "condition", "key_value_does_not_match aaa sample",
+                         "rename", "ok error",
+                         NULL);
+    TEST_CHECK(ret == 0);
+
+        /* Start the engine */
+    ret = flb_start(ctx->flb);
+    TEST_CHECK(ret == 0);
+
+    /* Ingest event */
+    p = "[0, {\"ok\":\"sample\"}]";
+    len = strlen(p);
+    bytes = flb_lib_push(ctx->flb, ctx->i_ffd, p, len);
+    TEST_CHECK(bytes == len);
+
+    sleep(1); /* waiting flush */
 
     filter_test_destroy(ctx);
 }
@@ -1079,6 +1519,14 @@ TEST_LIST = {
     {"op_hard_copy_exists"      , flb_test_op_hard_copy_exists },
     {"op_hard_copy_no_exists"   , flb_test_op_hard_copy_no_exists },
 
+    /* Conditions (nested) */
+    {"cond_key_value_matches_nest", flb_test_cond_key_value_matches_nest },
+    {"cond_key_value_does_not_match_nest", flb_test_cond_key_value_does_not_match_nest },
+    {"cond_key_exists_nest", flb_test_cond_key_exists_nest },
+    {"cond_key_does_not_exist_nest", flb_test_cond_key_does_not_exist_nest },
+    {"cond_key_value_equals_nest", flb_test_cond_key_value_equals_nest },
+    {"cond_key_value_does_not_equal_nest", flb_test_cond_key_value_does_not_equal_nest },
+
     /* Conditions */
     {"cond_key_exists", flb_test_cond_key_exists },
     {"cond_key_does_not_exist", flb_test_cond_key_does_not_exist },
@@ -1092,7 +1540,12 @@ TEST_LIST = {
      flb_test_cond_matching_keys_have_matching_values },
     {"cond_matching_keys_do_not_have_matching_values",
      flb_test_cond_matching_keys_do_not_have_matching_values },
-
     {"cond_chain", flb_test_cond_chain },
+
+    /* Bug fixes */
+    {"multiple events are not dropped", flb_test_not_drop_multi_event },
+    {"cond_key_value_does_not_equal and key does not exist", flb_test_issue_4319 },
+    {"cond_key_value_does_not_matches and key does not exist", flb_test_issue_4319_2 },
+
     {NULL, NULL}
 };

@@ -1,6 +1,7 @@
 /* -*- Mode: C; tab-width: 4; indent-tabs-mode: nil; c-basic-offset: 4 -*- */
 
 #include <fluent-bit.h>
+#include <fluent-bit/flb_time.h>
 #include <fluent-bit/flb_parser.h>
 #include "flb_tests_runtime.h"
 
@@ -63,7 +64,8 @@ void flb_test_filter_parser_extract_fields()
 
     /* Parser */
     parser = flb_parser_create("dummy_test", "regex", "^(?<INT>[^ ]+) (?<FLOAT>[^ ]+) (?<BOOL>[^ ]+) (?<STRING>.+)$",
-                               NULL, NULL, NULL, MK_FALSE, NULL, 0,
+                               FLB_TRUE,
+                               NULL, NULL, NULL, MK_FALSE, MK_TRUE, NULL, 0,
                                NULL, ctx->config);
     TEST_CHECK(parser != NULL);
 
@@ -96,15 +98,15 @@ void flb_test_filter_parser_extract_fields()
     bytes = flb_lib_push(ctx, in_ffd, p, strlen(p));
     TEST_CHECK(bytes == strlen(p));
 
-    sleep(1); /* waiting flush */
+    flb_time_msleep(1500); /* waiting flush */
     output = get_output(); /* 1sec passed, data should be flushed */
     TEST_CHECK_(output != NULL, "Expected output to not be NULL");
     if (output != NULL) {
         /* check timestamp */
-        expected = "[1448403340.000000, {";
+        expected = "[1448403340.000000,{";
         TEST_CHECK_(strstr(output, expected) != NULL, "Expected output to contain '%s', got '%s'", expected, output);
         /* check fields were extracted */
-        expected = "\"INT\":\"100\", \"FLOAT\":\"0.5\", \"BOOL\":\"true\", \"STRING\":\"This is an example\"";
+        expected = "\"INT\":\"100\",\"FLOAT\":\"0.5\",\"BOOL\":\"true\",\"STRING\":\"This is an example\"";
         TEST_CHECK_(strstr(output, expected) != NULL, "Expected output to contain '%s', got '%s'", expected, output);
         /* check original field was not preserved */
         expected = "\"data\":\"100 0.5 true This is an example\"";
@@ -148,7 +150,8 @@ void flb_test_filter_parser_reserve_data_off()
 
     /* Parser */
     parser = flb_parser_create("dummy_test", "regex", "^(?<INT>[^ ]+) (?<FLOAT>[^ ]+) (?<BOOL>[^ ]+) (?<STRING>.+)$",
-                               NULL, NULL, NULL, MK_FALSE, NULL, 0,
+                               FLB_TRUE,
+                               NULL, NULL, NULL, MK_FALSE, MK_TRUE, NULL, 0,
                                NULL, ctx->config);
     TEST_CHECK(parser != NULL);
 
@@ -176,11 +179,11 @@ void flb_test_filter_parser_reserve_data_off()
     TEST_CHECK(ret == 0);
 
     /* Ingest data */
-    p = "[1448403340, {\"data\":\"100 0.5 true This is an example\", \"extra\":\"Some more data\"}]";
+    p = "[1448403340,{\"data\":\"100 0.5 true This is an example\",\"extra\":\"Some more data\"}]";
     bytes = flb_lib_push(ctx, in_ffd, p, strlen(p));
     TEST_CHECK(bytes == strlen(p));
 
-    sleep(1); /* waiting flush */
+    flb_time_msleep(1500); /* waiting flush */
     output = get_output(); /* 1sec passed, data should be flushed */
     TEST_CHECK_(output != NULL, "Expected output to not be NULL");
     if (output != NULL) {
@@ -222,9 +225,10 @@ void flb_test_filter_parser_handle_time_key()
                   NULL);
 
     /* Parser */
-    parser = flb_parser_create("timestamp", "regex", "^(?<time>.*)$", "%Y-%m-%dT%H:%M:%S.%L",
+    parser = flb_parser_create("timestamp", "regex", "^(?<time>.*)$", FLB_TRUE,
+                               "%Y-%m-%dT%H:%M:%S.%L",
                                "time",
-                               NULL, MK_FALSE,
+                               NULL, MK_FALSE, MK_TRUE,
                                NULL, 0, NULL, ctx->config);
     TEST_CHECK(parser != NULL);
 
@@ -256,13 +260,13 @@ void flb_test_filter_parser_handle_time_key()
     bytes = flb_lib_push(ctx, in_ffd, p, strlen(p));
     TEST_CHECK(bytes == strlen(p));
 
-    sleep(1); /* waiting flush */
+    flb_time_msleep(1500); /* waiting flush */
     output = get_output(); /* 1sec passed, data should be flushed */
     TEST_CHECK_(output != NULL, "Expected output to not be NULL");
     if (output != NULL) {
         /* check the timestamp field was updated correctly */
         /* this is in fluent-bits extended timestamp format */
-        expected = "[1509575121.648000, {";
+        expected = "[1509575121.648000,{";
         TEST_CHECK_(strstr(output, expected) != NULL, "Expected output to contain '%s', got '%s'", expected, output);
         /* check additional field is preserved */
         expected = "\"message\":\"This is an example\"";
@@ -298,9 +302,10 @@ void flb_test_filter_parser_handle_time_key_with_fractional_timestamp()
                   NULL);
 
     /* Parser */
-    parser = flb_parser_create("timestamp", "regex", "^(?<time>.*)$", "%s.%L",
+    parser = flb_parser_create("timestamp", "regex", "^(?<time>.*)$", FLB_TRUE,
+                               "%s.%L",
                                "time",
-                               NULL, MK_FALSE,
+                               NULL, MK_FALSE, MK_TRUE,
                                NULL, 0, NULL, ctx->config);
     TEST_CHECK(parser != NULL);
 
@@ -332,7 +337,7 @@ void flb_test_filter_parser_handle_time_key_with_fractional_timestamp()
     bytes = flb_lib_push(ctx, in_ffd, p, strlen(p));
     TEST_CHECK(bytes == strlen(p));
 
-    sleep(1); /* waiting flush */
+    flb_time_msleep(1500); /* waiting flush */
     output = get_output(); /* 1sec passed, data should be flushed */
     TEST_CHECK_(output != NULL, "Expected output to not be NULL");
     if (output != NULL) {
@@ -379,8 +384,9 @@ void flb_test_filter_parser_ignore_malformed_time()
 
     /* Parser */
     parser = flb_parser_create("timestamp", "regex",
-                               "^(?<time>.*)$", "%Y-%m-%dT%H:%M:%S.%L", "time",
-                               NULL, FLB_FALSE,
+                               "^(?<time>.*)$", FLB_TRUE,
+                               "%Y-%m-%dT%H:%M:%S.%L", "time",
+                               NULL, FLB_FALSE, MK_TRUE,
                                NULL, 0, NULL, ctx->config);
     TEST_CHECK(parser != NULL);
 
@@ -413,12 +419,12 @@ void flb_test_filter_parser_ignore_malformed_time()
     bytes = flb_lib_push(ctx, in_ffd, p, strlen(p));
     TEST_CHECK(bytes == strlen(p));
 
-    sleep(1); /* waiting flush */
+    flb_time_msleep(1500); /* waiting flush */
     output = get_output(); /* 1sec passed, data should be flushed */
     TEST_CHECK_(output != NULL, "Expected output to not be NULL");
     if (output != NULL) {
         /* check the timestamp field was ignored and we received everything else */
-        expected = "[1448403340.000000, {\"@timestamp\":\"2017_$!^-11-01T22:25:21.648\", \"log\":\"An example\"}]";
+        expected = "[1448403340.000000,{\"@timestamp\":\"2017_$!^-11-01T22:25:21.648\",\"log\":\"An example\"}]";
         TEST_CHECK_(strcmp(output, expected) == 0, "Expected output to be '%s', got '%s'", expected, output);
         free(output);
     }
@@ -456,7 +462,8 @@ void flb_test_filter_parser_preserve_original_field()
 
     /* Parser */
     parser = flb_parser_create("dummy_test", "regex", "^(?<INT>[^ ]+) (?<FLOAT>[^ ]+) (?<BOOL>[^ ]+) (?<STRING>.+)$",
-                               NULL, NULL, NULL, MK_FALSE, NULL, 0,
+                               FLB_TRUE,
+                               NULL, NULL, NULL, MK_FALSE, MK_TRUE, NULL, 0,
                                NULL, ctx->config);
     TEST_CHECK(parser != NULL);
 
@@ -485,11 +492,11 @@ void flb_test_filter_parser_preserve_original_field()
     TEST_CHECK(ret == 0);
 
     /* Ingest data */
-    p = "[1448403340, {\"data\":\"100 0.5 true This is an example\", \"log\":\"An example\"}]";
+    p = "[1448403340,{\"data\":\"100 0.5 true This is an example\",\"log\":\"An example\"}]";
     bytes = flb_lib_push(ctx, in_ffd, p, strlen(p));
     TEST_CHECK(bytes == strlen(p));
 
-    sleep(1); /* waiting flush */
+    flb_time_msleep(1500); /* waiting flush */
     output = get_output(); /* 1sec passed, data should be flushed */
     TEST_CHECK_(output != NULL, "Expected output to not be NULL");
     if (output != NULL) {
@@ -497,7 +504,7 @@ void flb_test_filter_parser_preserve_original_field()
         expected = "\"data\":\"100 0.5 true This is an example\"";
         TEST_CHECK_(strstr(output, expected) != NULL, "Expected output to contain '%s', got '%s'", expected, output);
         /* check fields were extracted */
-        expected = "\"INT\":\"100\", \"FLOAT\":\"0.5\", \"BOOL\":\"true\", \"STRING\":\"This is an example\"";
+        expected = "\"INT\":\"100\",\"FLOAT\":\"0.5\",\"BOOL\":\"true\",\"STRING\":\"This is an example\"";
         TEST_CHECK_(strstr(output, expected) != NULL, "Expected output to contain '%s', got '%s'", expected, output);
         /* check other fields are preserved */
         expected = "\"log\":\"An example\"";
@@ -509,11 +516,177 @@ void flb_test_filter_parser_preserve_original_field()
     flb_destroy(ctx);
 }
 
+// https://github.com/fluent/fluent-bit/issues/2250
+void flb_test_filter_parser_first_matched_when_mutilple_parser()
+{
+    int ret;
+    int bytes;
+    char *p, *output, *expected;
+    flb_ctx_t *ctx;
+    int in_ffd;
+    int out_ffd;
+    int filter_ffd;
+    struct flb_parser *parser;
+
+    struct flb_lib_out_cb cb;
+    cb.cb   = callback_test;
+    cb.data = NULL;
+
+    ctx = flb_create();
+
+    /* Configure service */
+    flb_service_set(ctx, "Flush", "1", "Grace" "1", "Log_Level", "debug", NULL);
+
+    /* Input */
+    in_ffd = flb_input(ctx, (char *) "lib", NULL);
+    TEST_CHECK(in_ffd >= 0);
+    flb_input_set(ctx, in_ffd,
+                  "Tag", "test",
+                  NULL);
+
+    /* Parser */
+    parser = flb_parser_create("one", "regex", "^(?<one>.+?)$",
+                               FLB_TRUE,
+                               NULL, NULL, NULL, MK_FALSE, MK_TRUE,
+                               NULL, 0, NULL, ctx->config);
+    TEST_CHECK(parser != NULL);
+
+    parser = flb_parser_create("two", "regex", "^(?<two>.+?)$",
+                               FLB_TRUE,
+                               NULL, NULL, NULL, MK_FALSE, MK_TRUE,
+                               NULL, 0, NULL, ctx->config);
+    TEST_CHECK(parser != NULL);
+
+    /* Filter */
+    filter_ffd = flb_filter(ctx, (char *) "parser", NULL);
+    TEST_CHECK(filter_ffd >= 0);
+    ret = flb_filter_set(ctx, filter_ffd,
+                         "Match", "test",
+                         "Key_Name", "data",
+                         "Parser", "one",
+                         "Parser", "two",
+                         "Reserve_Data", "On",
+                         "Preserve_Key", "On",
+                         NULL);
+    TEST_CHECK(ret == 0);
+
+    /* Output */
+    out_ffd = flb_output(ctx, (char *) "lib", &cb);
+    TEST_CHECK(out_ffd >= 0);
+    flb_output_set(ctx, out_ffd,
+                   "Match", "*",
+                   "format", "json",
+                   NULL);
+
+    /* Start the engine */
+    ret = flb_start(ctx);
+    TEST_CHECK(ret == 0);
+
+    /* Ingest data */
+    p = "[1,{\"data\":\"hoge\"}]";
+    bytes = flb_lib_push(ctx, in_ffd, p, strlen(p));
+    TEST_CHECK(bytes == strlen(p));
+
+    flb_time_msleep(1500); /* waiting flush */
+    output = get_output(); /* 1sec passed, data should be flushed */
+    TEST_CHECK_(output != NULL, "Expected output to not be NULL");
+    if (output != NULL) {
+        /* check extra data was not preserved */
+        expected = "\"one\":\"hoge\",\"data\":\"hoge\"";
+        TEST_CHECK_(strstr(output, expected) != NULL, "Expected output to contain key one , got '%s'", output);
+        free(output);
+    }
+
+    flb_stop(ctx);
+    flb_destroy(ctx);
+}
+
+// https://github.com/fluent/fluent-bit/issues/1486
+// https://github.com/fluent/fluent-bit/issues/2939
+void flb_test_filter_parser_skip_empty_values_false()
+{
+    int ret;
+    int bytes;
+    char *p, *output, *expected;
+    flb_ctx_t *ctx;
+    int in_ffd;
+    int out_ffd;
+    int filter_ffd;
+    struct flb_parser *parser;
+
+    struct flb_lib_out_cb cb;
+    cb.cb   = callback_test;
+    cb.data = NULL;
+
+    ctx = flb_create();
+
+    /* Configure service */
+    flb_service_set(ctx, "Flush", "1", "Grace" "1", "Log_Level", "debug", NULL);
+
+    /* Input */
+    in_ffd = flb_input(ctx, (char *) "lib", NULL);
+    TEST_CHECK(in_ffd >= 0);
+    flb_input_set(ctx, in_ffd,
+                  "Tag", "test",
+                  NULL);
+
+    /* Parser */
+    parser = flb_parser_create("one", "regex", "^(?<one>.+?)$",
+                               FLB_FALSE,
+                               NULL, NULL, NULL, MK_FALSE, MK_TRUE,
+                               NULL, 0, NULL, ctx->config);
+    TEST_CHECK(parser != NULL);
+
+    /* Filter */
+    filter_ffd = flb_filter(ctx, (char *) "parser", NULL);
+    TEST_CHECK(filter_ffd >= 0);
+    ret = flb_filter_set(ctx, filter_ffd,
+                         "Match", "test",
+                         "Key_Name", "data",
+                         "Parser", "one",
+                         NULL);
+    TEST_CHECK(ret == 0);
+
+    /* Output */
+    out_ffd = flb_output(ctx, (char *) "lib", &cb);
+    TEST_CHECK(out_ffd >= 0);
+    flb_output_set(ctx, out_ffd,
+                   "Match", "*",
+                   "format", "json",
+                   NULL);
+
+    /* Start the engine */
+    ret = flb_start(ctx);
+    TEST_CHECK(ret == 0);
+
+    /* Ingest data */
+    p = "[1,{\"data\":\"\"}]";
+    bytes = flb_lib_push(ctx, in_ffd, p, strlen(p));
+    TEST_CHECK(bytes == strlen(p));
+
+    sleep(1); /* waiting flush */
+    output = get_output(); /* 1sec passed, data should be flushed */
+    TEST_CHECK_(output != NULL, "Expected output to not be NULL");
+    if (output != NULL) {
+        /* check extra data was not preserved */
+        expected = "\"data\":\"\"";
+        TEST_CHECK_(strstr(output, expected) != NULL, "Expected output to contain key one , got '%s'", output);
+        free(output);
+    }
+
+    flb_stop(ctx);
+    flb_destroy(ctx);
+}
+
+
 TEST_LIST = {
     {"filter_parser_extract_fields", flb_test_filter_parser_extract_fields },
     {"filter_parser_reserve_data_off", flb_test_filter_parser_reserve_data_off },
     {"filter_parser_handle_time_key", flb_test_filter_parser_handle_time_key },
     {"filter_parser_ignore_malformed_time", flb_test_filter_parser_ignore_malformed_time },
     {"filter_parser_preserve_original_field", flb_test_filter_parser_preserve_original_field },
+    {"filter_parser_first_matched_when_multiple_parser", flb_test_filter_parser_first_matched_when_mutilple_parser },
+    {"filter_parser_skip_empty_values_false", flb_test_filter_parser_skip_empty_values_false},
     {NULL, NULL}
 };
+

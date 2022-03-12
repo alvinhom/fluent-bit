@@ -2,8 +2,7 @@
 
 /*  Fluent Bit
  *  ==========
- *  Copyright (C) 2019      The Fluent Bit Authors
- *  Copyright (C) 2015-2018 Treasure Data Inc.
+ *  Copyright (C) 2015-2022 The Fluent Bit Authors
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -22,6 +21,7 @@
 #include <fluent-bit/flb_config.h>
 #include <fluent-bit/flb_plugin_proxy.h>
 #include <fluent-bit/flb_output.h>
+#include "./go.h"
 
 /*
  * These functions needs to be moved to a better place, still in
@@ -33,7 +33,7 @@
 /*
  * Go Plugin phases
  * ================
- *  Copyright (C) 2019      The Fluent Bit Authors
+ *  Copyright (C) 2015-2022 The Fluent Bit Authors
  *
  *  1. FLBPluginRegister(context)
  *  2. Inside FLBPluginRegister, it needs to register it self using Fluent Bit API
@@ -51,18 +51,6 @@
  *
  * 3. Plugin Initialization
  */
-
-struct flbgo_output_plugin {
-    char *name;
-    void *api;
-    void *o_ins;
-    struct flb_plugin_proxy_context *context;
-
-    int (*cb_init)();
-    int (*cb_flush)(const void *, size_t, const char *);
-    int (*cb_flush_ctx)(void *, const void *, size_t, char *);
-    int (*cb_exit)(void *);
-};
 /*------------------------EOF------------------------------------------------*/
 
 int proxy_go_register(struct flb_plugin_proxy *proxy,
@@ -97,6 +85,7 @@ int proxy_go_register(struct flb_plugin_proxy *proxy,
     plugin->cb_flush = flb_plugin_proxy_symbol(proxy, "FLBPluginFlush");
     plugin->cb_flush_ctx = flb_plugin_proxy_symbol(proxy, "FLBPluginFlushCtx");
     plugin->cb_exit  = flb_plugin_proxy_symbol(proxy, "FLBPluginExit");
+    plugin->cb_exit_ctx = flb_plugin_proxy_symbol(proxy, "FLBPluginExitCtx");
     plugin->name     = flb_strdup(def->name);
 
     /* This Go plugin context is an opaque data for the parent proxy */
@@ -136,7 +125,7 @@ int proxy_go_flush(struct flb_plugin_proxy_context *ctx,
     char *buf;
     struct flbgo_output_plugin *plugin = ctx->proxy->data;
 
-    /* temporal buffer for the tag */
+    /* temporary buffer for the tag */
     buf = flb_malloc(tag_len + 1);
     if (!buf) {
         flb_errno();
@@ -153,5 +142,24 @@ int proxy_go_flush(struct flb_plugin_proxy_context *ctx,
         ret = plugin->cb_flush(data, size, buf);
     }
     flb_free(buf);
+    return ret;
+}
+
+int proxy_go_destroy(void *data)
+{
+    int ret = 0;
+    struct flbgo_output_plugin *plugin;
+
+    plugin = (struct flbgo_output_plugin *) data;
+    flb_debug("[GO] running exit callback");
+
+    if (plugin->cb_exit_ctx) {
+        ret = plugin->cb_exit_ctx(plugin->context->remote_context);
+    }
+    else if (plugin->cb_exit) {
+        ret = plugin->cb_exit();
+    }
+    flb_free(plugin->name);
+    flb_free(plugin);
     return ret;
 }

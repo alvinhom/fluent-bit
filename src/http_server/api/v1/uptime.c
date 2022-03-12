@@ -2,8 +2,7 @@
 
 /*  Fluent Bit
  *  ==========
- *  Copyright (C) 2019      The Fluent Bit Authors
- *  Copyright (C) 2015-2018 Treasure Data Inc.
+ *  Copyright (C) 2015-2022 The Fluent Bit Authors
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -67,7 +66,7 @@ static void uptime_hr(time_t uptime, msgpack_packer *mp_pck)
 /* API: List all built-in plugins */
 static void cb_uptime(mk_request_t *request, void *data)
 {
-    char *out_buf;
+    flb_sds_t out_buf;
     size_t out_size;
     time_t uptime;
     msgpack_packer mp_pck;
@@ -89,15 +88,19 @@ static void cb_uptime(mk_request_t *request, void *data)
     uptime_hr(uptime, &mp_pck);
 
     /* Export to JSON */
-    flb_msgpack_raw_to_json_str(mp_sbuf.data, mp_sbuf.size,
-                                &out_buf, &out_size);
+    out_buf = flb_msgpack_raw_to_json_sds(mp_sbuf.data, mp_sbuf.size);
     msgpack_sbuffer_destroy(&mp_sbuf);
+    if (!out_buf) {
+        return;
+    }
+    out_size = flb_sds_len(out_buf);
 
     mk_http_status(request, 200);
+    flb_hs_add_content_type_to_req(request, FLB_HS_CONTENT_TYPE_JSON);
     mk_http_send(request, out_buf, out_size, NULL);
     mk_http_done(request);
 
-    flb_free(out_buf);
+    flb_sds_destroy(out_buf);
 }
 
 /* Perform registration */

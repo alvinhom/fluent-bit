@@ -2,8 +2,7 @@
 
 /*  Fluent Bit
  *  ==========
- *  Copyright (C) 2019      The Fluent Bit Authors
- *  Copyright (C) 2015-2018 Treasure Data Inc.
+ *  Copyright (C) 2015-2022 The Fluent Bit Authors
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -33,6 +32,10 @@
 #include <fluent-bit/flb_engine.h>
 #include <fluent-bit/flb_metrics.h>
 #include <fluent-bit/flb_storage.h>
+#include <fluent-bit/flb_kv.h>
+#include <fluent-bit/flb_hash.h>
+
+struct flb_libco_in_params libco_in_param;
 
 #define protcmp(a, b)  strncasecmp(a, b, strlen(a))
 
@@ -41,7 +44,7 @@ static int check_protocol(const char *prot, const char *output)
     int len;
 
     len = strlen(prot);
-    if (len > strlen(output)) {
+    if (len != strlen(output)) {
         return 0;
     }
 
@@ -70,19 +73,49 @@ static inline int instance_id(struct flb_input_plugin *p,
 }
 
 /* Generate a new collector ID for the instance in question */
-static int collector_id(struct flb_input_instance *in)
+static int collector_id(struct flb_input_instance *ins)
 {
     int id = 0;
     struct flb_input_collector *collector;
 
-    if (mk_list_is_empty(&in->collectors) == 0) {
+    if (mk_list_is_empty(&ins->collectors) == 0) {
         return id;
     }
 
-    collector = mk_list_entry_last(&in->collectors,
+    collector = mk_list_entry_last(&ins->collectors,
                                    struct flb_input_collector,
                                    _head_ins);
     return (collector->id + 1);
+}
+
+void flb_input_net_default_listener(const char *listen, int port,
+                                    struct flb_input_instance *ins)
+{
+    /* Set default network configuration */
+    if (!ins->host.listen) {
+        ins->host.listen = flb_sds_create(listen);
+    }
+    if (ins->host.port == 0) {
+        ins->host.port = port;
+    }
+}
+
+int flb_input_event_type_is_metric(struct flb_input_instance *ins)
+{
+    if (ins->event_type == FLB_INPUT_METRICS) {
+        return FLB_TRUE;
+    }
+
+    return FLB_FALSE;
+}
+
+int flb_input_event_type_is_log(struct flb_input_instance *ins)
+{
+    if (ins->event_type == FLB_INPUT_LOGS) {
+        return FLB_TRUE;
+    }
+
+    return FLB_FALSE;
 }
 
 /* Create an input plugin instance */
@@ -116,9 +149,9 @@ struct flb_input_instance *flb_input_new(struct flb_config *config,
         }
 
         /* Create plugin instance */
-        instance = flb_malloc(sizeof(struct flb_input_instance));
+        instance = flb_calloc(1, sizeof(struct flb_input_instance));
         if (!instance) {
-            perror("malloc");
+            flb_errno();
             return NULL;
         }
         instance->config = config;
@@ -126,34 +159,74 @@ struct flb_input_instance *flb_input_new(struct flb_config *config,
         /* Get an ID */
         id =  instance_id(plugin, config);
 
+        /* Index for log Chunks (hash table) */
+        instance->ht_log_chunks = flb_hash_create(FLB_HASH_EVICT_NONE, 512, 0);
+        if (!instance->ht_log_chunks) {
+            flb_free(instance);
+            return NULL;
+        }
+
+        /* Index for metric Chunks (hash table) */
+        instance->ht_metric_chunks = flb_hash_create(FLB_HASH_EVICT_NONE, 512, 0);
+        if (!instance->ht_metric_chunks) {
+            flb_hash_destroy(instance->ht_log_chunks);
+            flb_free(instance);
+            return NULL;
+        }
+
         /* format name (with instance id) */
         snprintf(instance->name, sizeof(instance->name) - 1,
                  "%s.%i", plugin->name, id);
 
+        /* set plugin type based on flags: logs or metrics ? */
+        if (plugin->event_type == FLB_INPUT_LOGS) {
+            instance->event_type = FLB_INPUT_LOGS;
+        }
+        else if (plugin->event_type == FLB_INPUT_METRICS) {
+            instance->event_type = FLB_INPUT_METRICS;
+        }
+        else {
+            flb_error("[input] invalid plugin event type %i on '%s'",
+                      plugin->event_type, instance->name);
+            flb_hash_destroy(instance->ht_log_chunks);
+            flb_hash_destroy(instance->ht_metric_chunks);
+            flb_free(instance);
+            return NULL;
+        }
+
+        /* initialize remaining vars */
         instance->alias    = NULL;
         instance->id       = id;
         instance->flags    = plugin->flags;
         instance->p        = plugin;
         instance->tag      = NULL;
         instance->tag_len  = 0;
+        instance->routable = FLB_TRUE;
         instance->context  = NULL;
         instance->data     = data;
-        instance->threaded = FLB_FALSE;
         instance->storage  = NULL;
+        instance->storage_type = -1;
+        instance->log_level = -1;
+        instance->runs_in_coroutine = FLB_FALSE;
 
         /* net */
         instance->host.name    = NULL;
         instance->host.address = NULL;
         instance->host.uri     = NULL;
+        instance->host.listen  = NULL;
         instance->host.ipv6    = FLB_FALSE;
 
         /* Initialize list heads */
+        mk_list_init(&instance->routes_direct);
         mk_list_init(&instance->routes);
         mk_list_init(&instance->tasks);
         mk_list_init(&instance->chunks);
-        mk_list_init(&instance->properties);
         mk_list_init(&instance->collectors);
-        mk_list_init(&instance->threads);
+        mk_list_init(&instance->input_coro_list);
+        mk_list_init(&instance->input_coro_list_destroy);
+
+        /* Initialize properties list */
+        flb_kv_init(&instance->properties);
 
         /* Plugin use networking */
         if (plugin->flags & FLB_INPUT_NET) {
@@ -165,15 +238,15 @@ struct flb_input_instance *flb_input_new(struct flb_config *config,
         }
 
         /* Plugin requires a Thread context */
-        if (plugin->flags & FLB_INPUT_THREAD) {
-            instance->threaded = FLB_TRUE;
+        if (plugin->flags & FLB_INPUT_CORO) {
+            instance->runs_in_coroutine = FLB_TRUE;
         }
 
         instance->mp_total_buf_size = 0;
         instance->mem_buf_status = FLB_INPUT_RUNNING;
         instance->mem_buf_limit = 0;
         instance->mem_chunks_size = 0;
-
+        instance->storage_buf_status = FLB_INPUT_RUNNING;
         mk_list_add(&instance->_head, &config->inputs);
     }
 
@@ -193,176 +266,406 @@ static inline int prop_key_check(const char *key, const char *kv, int k_len)
     return -1;
 }
 
+struct flb_input_instance *flb_input_get_instance(struct flb_config *config,
+                                                  int ins_id)
+{
+    struct mk_list *head;
+    struct flb_input_instance *ins;
+
+    mk_list_foreach(head, &config->inputs) {
+        ins = mk_list_entry(head, struct flb_input_instance, _head);
+        if (ins->id == ins_id) {
+            break;
+        }
+        ins = NULL;
+    }
+
+    if (!ins) {
+        return NULL;
+    }
+
+    return ins;
+}
+
+static void flb_input_coro_destroy(struct flb_input_coro *input_coro)
+{
+    flb_debug("[input coro] destroy coro_id=%i", input_coro->id);
+
+    mk_list_del(&input_coro->_head);
+    flb_coro_destroy(input_coro->coro);
+    flb_free(input_coro);
+}
+
+int flb_input_coro_finished(struct flb_config *config, int ins_id)
+{
+    struct mk_list *tmp;
+    struct mk_list *head;
+    struct flb_input_instance *ins;
+    struct flb_input_coro *input_coro;
+
+    ins = flb_input_get_instance(config, ins_id);
+    if (!ins) {
+        return -1;
+    }
+
+    /* Look for input coroutines that needs to be destroyed */
+    mk_list_foreach_safe(head, tmp, &ins->input_coro_list_destroy) {
+        input_coro = mk_list_entry(head, struct flb_input_coro, _head);
+        printf("coro destroy!: coro_id=%i\n", input_coro->id);
+        flb_input_coro_destroy(input_coro);
+    }
+
+    return 0;
+}
+
+void flb_input_coro_prepare_destroy(struct flb_input_coro *input_coro)
+{
+    struct flb_input_instance *ins = input_coro->ins;
+
+    /* move flb_input_coro from 'input_coro_list' to 'input_coro_list_destroy' */
+    mk_list_del(&input_coro->_head);
+    mk_list_add(&input_coro->_head, &ins->input_coro_list_destroy);
+}
+
+int flb_input_name_exists(const char *name, struct flb_config *config)
+{
+    struct mk_list *head;
+    struct flb_input_instance *ins;
+
+    mk_list_foreach(head, &config->inputs) {
+        ins = mk_list_entry(head, struct flb_input_instance, _head);
+        if (strcmp(ins->name, name) == 0) {
+            return FLB_TRUE;
+        }
+
+        if (ins->alias) {
+            if (strcmp(ins->alias, name) == 0) {
+                return FLB_TRUE;
+            }
+        }
+    }
+
+    return FLB_FALSE;
+}
+
 /* Override a configuration property for the given input_instance plugin */
-int flb_input_set_property(struct flb_input_instance *in,
+int flb_input_set_property(struct flb_input_instance *ins,
                            const char *k, const char *v)
 {
     int len;
+    int ret;
     ssize_t limit;
-    char *tmp;
-    struct flb_config_prop *prop;
+    flb_sds_t tmp = NULL;
+    struct flb_kv *kv;
 
     len = strlen(k);
-    tmp = flb_env_var_translate(in->config->env, v);
+    tmp = flb_env_var_translate(ins->config->env, v);
     if (tmp) {
-        if (strlen(tmp) == 0) {
-            flb_free(tmp);
+        if (flb_sds_len(tmp) == 0) {
+            flb_sds_destroy(tmp);
             tmp = NULL;
         }
     }
 
     /* Check if the key is a known/shared property */
     if (prop_key_check("tag", k, len) == 0 && tmp) {
-        in->tag     = tmp;
-        in->tag_len = strlen(tmp);
+        ins->tag     = tmp;
+        ins->tag_len = flb_sds_len(tmp);
+    }
+    else if (prop_key_check("log_level", k, len) == 0 && tmp) {
+        ret = flb_log_get_level_str(tmp);
+        flb_sds_destroy(tmp);
+        if (ret == -1) {
+            return -1;
+        }
+        ins->log_level = ret;
+    }
+    else if (prop_key_check("routable", k, len) == 0 && tmp) {
+        ins->routable = flb_utils_bool(tmp);
+        flb_sds_destroy(tmp);
     }
     else if (prop_key_check("alias", k, len) == 0 && tmp) {
-        in->alias = tmp;
+        ins->alias = tmp;
     }
     else if (prop_key_check("mem_buf_limit", k, len) == 0 && tmp) {
         limit = flb_utils_size_to_bytes(tmp);
-        flb_free(tmp);
+        flb_sds_destroy(tmp);
         if (limit == -1) {
             return -1;
         }
-        in->mem_buf_limit = (size_t) limit;
+        ins->mem_buf_limit = (size_t) limit;
     }
     else if (prop_key_check("listen", k, len) == 0) {
-        in->host.listen = tmp;
+        ins->host.listen = tmp;
     }
     else if (prop_key_check("host", k, len) == 0) {
-        in->host.name   = tmp;
+        ins->host.name   = tmp;
     }
     else if (prop_key_check("port", k, len) == 0) {
         if (tmp) {
-            in->host.port = atoi(tmp);
-            flb_free(tmp);
+            ins->host.port = atoi(tmp);
+            flb_sds_destroy(tmp);
         }
     }
     else if (prop_key_check("ipv6", k, len) == 0 && tmp) {
-        in->host.ipv6 = flb_utils_bool(tmp);
-        flb_free(tmp);
+        ins->host.ipv6 = flb_utils_bool(tmp);
+        flb_sds_destroy(tmp);
+    }
+    else if (prop_key_check("storage.type", k, len) == 0 && tmp) {
+        /* Set the storage type */
+        if (strcasecmp(tmp, "filesystem") == 0) {
+            ins->storage_type = CIO_STORE_FS;
+        }
+        else if (strcasecmp(tmp, "memory") == 0) {
+            ins->storage_type = CIO_STORE_MEM;
+        }
+        else {
+            flb_sds_destroy(tmp);
+            return -1;
+        }
+        flb_sds_destroy(tmp);
+    }
+    else if (prop_key_check("storage.pause_on_chunks_overlimit", k, len) == 0 && tmp) {
+        if (ins->storage_type == CIO_STORE_FS) {
+            ret = flb_utils_bool(tmp);
+            if (ret == -1) {
+                return -1;
+            }
+            ins->storage_pause_on_chunks_overlimit = ret;
+        }
     }
     else {
-        /* Append any remaining configuration key to prop list */
-        prop = flb_malloc(sizeof(struct flb_config_prop));
-        if (!prop) {
+        /*
+         * Create the property, we don't pass the value since we will
+         * map it directly to avoid an extra memory allocation.
+         */
+        kv = flb_kv_item_create(&ins->properties, (char *) k, NULL);
+        if (!kv) {
             if (tmp) {
-                flb_free(tmp);
+                flb_sds_destroy(tmp);
             }
             return -1;
         }
-
-        prop->key = flb_strdup(k);
-        prop->val = tmp;
-        mk_list_add(&prop->_head, &in->properties);
+        kv->val = tmp;
     }
 
     return 0;
 }
 
-const char *flb_input_get_property(const char *key, struct flb_input_instance *i)
+const char *flb_input_get_property(const char *key,
+                                   struct flb_input_instance *ins)
 {
-    return flb_config_prop_get(key, &i->properties);
+    return flb_config_prop_get(key, &ins->properties);
 }
 
 /* Return an instance name or alias */
-const char *flb_input_name(struct flb_input_instance *in)
+const char *flb_input_name(struct flb_input_instance *ins)
 {
-    if (in->alias) {
-        return in->alias;
+    if (ins->alias) {
+        return ins->alias;
     }
 
-    return in->name;
+    return ins->name;
 }
 
-void flb_input_instance_free(struct flb_input_instance *in)
+void flb_input_instance_destroy(struct flb_input_instance *ins)
 {
-    struct mk_list *head_prop;
-    struct flb_config_prop *prop;
-    struct mk_list *tmp_prop;
-
-    if (in->alias) {
-        flb_free(in->alias);
+    if (ins->alias) {
+        flb_sds_destroy(ins->alias);
     }
 
     /* Remove URI context */
-    if (in->host.uri) {
-        flb_uri_destroy(in->host.uri);
+    if (ins->host.uri) {
+        flb_uri_destroy(ins->host.uri);
     }
-    flb_free(in->host.name);
-    flb_free(in->host.address);
+
+    if (ins->host.name) {
+        flb_sds_destroy(ins->host.name);
+    }
+    if (ins->host.address) {
+        flb_sds_destroy(ins->host.address);
+    }
+    if (ins->host.listen) {
+        flb_sds_destroy(ins->host.listen);
+    }
 
     /* release the tag if any */
-    flb_free(in->tag);
+    flb_sds_destroy(ins->tag);
 
     /* Let the engine remove any pending task */
-    flb_engine_destroy_tasks(&in->tasks);
+    flb_engine_destroy_tasks(&ins->tasks);
 
     /* release properties */
-    mk_list_foreach_safe(head_prop, tmp_prop, &in->properties) {
-        prop = mk_list_entry(head_prop, struct flb_config_prop, _head);
-
-        flb_free(prop->key);
-        flb_free(prop->val);
-
-        mk_list_del(&prop->_head);
-        flb_free(prop);
-    }
+    flb_kv_release(&ins->properties);
 
     /* Remove metrics */
 #ifdef FLB_HAVE_METRICS
-    if (in->metrics) {
-        flb_metrics_destroy(in->metrics);
+    if (ins->cmt) {
+        cmt_destroy(ins->cmt);
+    }
+
+    if (ins->metrics) {
+        flb_metrics_destroy(ins->metrics);
     }
 #endif
 
-    if (in->storage) {
-        flb_storage_input_destroy(in);
+    if (ins->storage) {
+        flb_storage_input_destroy(ins);
+    }
+
+    /* destroy config map */
+    if (ins->config_map) {
+        flb_config_map_destroy(ins->config_map);
+    }
+
+    /* hash table for chunks */
+    if (ins->ht_log_chunks) {
+        flb_hash_destroy(ins->ht_log_chunks);
+    }
+
+    if (ins->ht_metric_chunks) {
+        flb_hash_destroy(ins->ht_metric_chunks);
     }
 
     /* Unlink and release */
-    mk_list_del(&in->_head);
-    flb_free(in);
+    mk_list_del(&ins->_head);
+
+    flb_free(ins);
 }
 
-int flb_input_instance_init(struct flb_input_instance *in,
+int flb_input_coro_id_get(struct flb_input_instance *ins)
+{
+    int id;
+    int max = (2 << 13) - 1; /* max for 14 bits */
+
+    id = ins->input_coro_id;
+    ins->input_coro_id++;
+
+    /* reset once it reach the maximum allowed */
+    if (ins->input_coro_id > max) {
+        ins->input_coro_id = 0;
+    }
+
+    return id;
+}
+
+int flb_input_instance_init(struct flb_input_instance *ins,
                             struct flb_config *config)
 {
     int ret;
-    const char *name;
-    struct flb_input_plugin *p = in->p;
+    struct mk_list *config_map;
+    struct flb_input_plugin *p = ins->p;
+
+    if (ins->log_level == -1 && config->log != NULL) {
+        ins->log_level = config->log->level;
+    }
 
     /* Skip pseudo input plugins */
     if (!p) {
         return 0;
     }
 
-    /* Metrics */
-#ifdef FLB_HAVE_METRICS
-    /* Get name or alias for the instance */
-    name = flb_input_name(in);
+    /* Input event channel */
+    ret = mk_event_channel_create(config->evl,
+                                  &ins->ch_events[0],
+                                  &ins->ch_events[1],
+                                  ins);
+    if (ret != 0) {
+        flb_error("could not create events channels for '%s'",
+                  flb_input_name(ins));
+        return -1;
+    }
 
-    /* Create the metrics context */
-    in->metrics = flb_metrics_create(name);
-    if (in->metrics) {
-        flb_metrics_add(FLB_METRIC_N_RECORDS, "records", in->metrics);
-        flb_metrics_add(FLB_METRIC_N_BYTES, "bytes", in->metrics);
+    flb_debug("[%s:%s] created event channels: read=%i write=%i",
+              ins->p->name, flb_input_name(ins),
+              ins->ch_events[0], ins->ch_events[1]);
+
+    /*
+     * Note: mk_event_channel_create() sets a type = MK_EVENT_NOTIFICATION by
+     * default, we need to overwrite this value so we can do a clean check
+     * into the Engine when the event is triggered.
+     */
+    ins->event.type = FLB_ENGINE_EV_INPUT;
+
+#ifdef FLB_HAVE_METRICS
+    uint64_t ts;
+    char *name;
+
+    name = (char *) flb_input_name(ins);
+    ts = cmt_time_now();
+
+    /* CMetrics */
+    ins->cmt = cmt_create();
+    if (!ins->cmt) {
+        flb_error("[input] could not create cmetrics context: %s",
+                  flb_input_name(ins));
+        return -1;
+    }
+
+    /* Register generic input plugin metrics */
+    ins->cmt_bytes = cmt_counter_create(ins->cmt,
+                                        "fluentbit", "input", "bytes_total",
+                                        "Number of input bytes.",
+                                        1, (char *[]) {"name"});
+    cmt_counter_set(ins->cmt_bytes, ts, 0, 1, (char *[]) {name});
+
+    ins->cmt_records = cmt_counter_create(ins->cmt,
+                                        "fluentbit", "input", "records_total",
+                                        "Number of input records.",
+                                        1, (char *[]) {"name"});
+    cmt_counter_set(ins->cmt_records, ts, 0, 1, (char *[]) {name});
+
+    /* OLD Metrics */
+    ins->metrics = flb_metrics_create(name);
+    if (ins->metrics) {
+        flb_metrics_add(FLB_METRIC_N_RECORDS, "records", ins->metrics);
+        flb_metrics_add(FLB_METRIC_N_BYTES, "bytes", ins->metrics);
     }
 #endif
+
+    /*
+     * Before to call the initialization callback, make sure that the received
+     * configuration parameters are valid if the plugin is registering a config map.
+     */
+    if (p->config_map) {
+        /*
+         * Create a dynamic version of the configmap that will be used by the specific
+         * instance in question.
+         */
+        config_map = flb_config_map_create(config, p->config_map);
+        if (!config_map) {
+            flb_error("[input] error loading config map for '%s' plugin",
+                      p->name);
+            flb_input_instance_destroy(ins);
+            return -1;
+        }
+        ins->config_map = config_map;
+
+        /* Validate incoming properties against config map */
+        ret = flb_config_map_properties_check(ins->p->name,
+                                              &ins->properties, ins->config_map);
+        if (ret == -1) {
+            if (config->program_name) {
+                flb_helper("try the command: %s -i %s -h\n",
+                           config->program_name, ins->p->name);
+            }
+            flb_input_instance_destroy(ins);
+            return -1;
+        }
+    }
 
     /* Initialize the input */
     if (p->cb_init) {
         /* Sanity check: all non-dynamic tag input plugins must have a tag */
-        if (!in->tag) {
-            flb_input_set_property(in, "tag", in->name);
+        if (!ins->tag) {
+            flb_input_set_property(ins, "tag", ins->name);
         }
 
-        ret = p->cb_init(in, config, in->data);
+        ret = p->cb_init(ins, config, ins->data);
         if (ret != 0) {
             flb_error("Failed initialize input %s",
-                      in->name);
-            flb_input_instance_free(in);
+                      ins->name);
+            flb_input_instance_destroy(ins);
             return -1;
         }
     }
@@ -372,12 +675,12 @@ int flb_input_instance_init(struct flb_input_instance *in,
 
 
 /* Initialize all inputs */
-void flb_input_initialize_all(struct flb_config *config)
+int flb_input_init_all(struct flb_config *config)
 {
     int ret;
     struct mk_list *tmp;
     struct mk_list *head;
-    struct flb_input_instance *in;
+    struct flb_input_instance *ins;
     struct flb_input_plugin *p;
 
     /* Initialize thread-id table */
@@ -385,8 +688,8 @@ void flb_input_initialize_all(struct flb_config *config)
 
     /* Iterate all active input instance plugins */
     mk_list_foreach_safe(head, tmp, &config->inputs) {
-        in = mk_list_entry(head, struct flb_input_instance, _head);
-        p = in->p;
+        ins = mk_list_entry(head, struct flb_input_instance, _head);
+        p = ins->p;
 
         /* Skip pseudo input plugins */
         if (!p) {
@@ -394,41 +697,44 @@ void flb_input_initialize_all(struct flb_config *config)
         }
 
         /* Initialize instance */
-        ret = flb_input_instance_init(in, config);
+        ret = flb_input_instance_init(ins, config);
         if (ret == -1) {
             /* do nothing, it's ok if it fails */
+            return -1;
         }
     }
+
+    return 0;
 }
 
 /* Invoke all pre-run input callbacks */
 void flb_input_pre_run_all(struct flb_config *config)
 {
     struct mk_list *head;
-    struct flb_input_instance *in;
+    struct flb_input_instance *ins;
     struct flb_input_plugin *p;
 
     mk_list_foreach(head, &config->inputs) {
-        in = mk_list_entry(head, struct flb_input_instance, _head);
-        p = in->p;
+        ins = mk_list_entry(head, struct flb_input_instance, _head);
+        p = ins->p;
         if (!p) {
             continue;
         }
 
         if (p->cb_pre_run) {
-            p->cb_pre_run(in, config, in->context);
+            p->cb_pre_run(ins, config, ins->context);
         }
     }
 }
 
-void flb_input_instance_exit(struct flb_input_instance *in,
+void flb_input_instance_exit(struct flb_input_instance *ins,
                              struct flb_config *config)
 {
     struct flb_input_plugin *p;
 
-    p = in->p;
-    if (p->cb_exit && in->context) {
-        p->cb_exit(in->context, config);
+    p = ins->p;
+    if (p->cb_exit && ins->context) {
+        p->cb_exit(ins->context, config);
     }
 }
 
@@ -437,19 +743,19 @@ void flb_input_exit_all(struct flb_config *config)
 {
     struct mk_list *tmp;
     struct mk_list *head;
-    struct flb_input_instance *in;
+    struct flb_input_instance *ins;
     struct flb_input_plugin *p;
 
     /* Iterate instances */
     mk_list_foreach_safe_r(head, tmp, &config->inputs) {
-        in = mk_list_entry(head, struct flb_input_instance, _head);
-        p = in->p;
+        ins = mk_list_entry(head, struct flb_input_instance, _head);
+        p = ins->p;
         if (!p) {
             continue;
         }
 
-        flb_input_instance_exit(in, config);
-        flb_input_instance_free(in);
+        flb_input_instance_exit(ins, config);
+        flb_input_instance_destroy(ins);
     }
 }
 
@@ -466,7 +772,7 @@ int flb_input_check(struct flb_config *config)
 /*
  * API for Input plugins
  * =====================
- *  Copyright (C) 2019      The Fluent Bit Authors
+ *  Copyright (C) 2015-2022 The Fluent Bit Authors
  * The Input interface provides a certain number of functions that can be
  * used by Input plugins to configure it own behavior and request specific
  *
@@ -521,6 +827,11 @@ int flb_input_set_collector_time(struct flb_input_instance *in,
     struct flb_input_collector *collector;
 
     collector = flb_malloc(sizeof(struct flb_input_collector));
+    if (!collector) {
+        flb_errno();
+        return -1;
+    }
+
     collector->id          = collector_id(in);
     collector->type        = FLB_COLLECT_TIME;
     collector->cb_collect  = cb_collect;
@@ -546,6 +857,11 @@ int flb_input_set_collector_event(struct flb_input_instance *in,
     struct flb_input_collector *collector;
 
     collector = flb_malloc(sizeof(struct flb_input_collector));
+    if (!collector) {
+        flb_errno();
+        return -1;
+    }
+
     collector->id          = collector_id(in);
     collector->type        = FLB_COLLECT_FD_EVENT;
     collector->cb_collect  = cb_collect;
@@ -623,7 +939,7 @@ int flb_input_collector_start(int coll_id, struct flb_input_instance *in)
             ret = collector_start(coll, in->config);
             if (ret == -1) {
                 flb_error("[input] error starting collector #%i: %s",
-                          in->name);
+                          coll_id, in->name);
             }
             return ret;
         }
@@ -675,6 +991,7 @@ int flb_input_collector_running(int coll_id, struct flb_input_instance *in)
     return coll->running;
 }
 
+
 int flb_input_pause_all(struct flb_config *config)
 {
     int paused = 0;
@@ -683,9 +1000,9 @@ int flb_input_pause_all(struct flb_config *config)
 
     mk_list_foreach(head, &config->inputs) {
         in = mk_list_entry(head, struct flb_input_instance, _head);
-        flb_info("[input] pausing %s", in->name);
         if (flb_input_buf_paused(in) == FLB_FALSE) {
-            if (in->p->cb_pause) {
+            if (in->p->cb_pause && in->context) {
+                flb_info("[input] pausing %s", flb_input_name(in));
                 in->p->cb_pause(in->context, in->config);
             }
             paused++;
@@ -699,6 +1016,7 @@ int flb_input_pause_all(struct flb_config *config)
 int flb_input_collector_pause(int coll_id, struct flb_input_instance *in)
 {
     int ret;
+    flb_pipefd_t fd;
     struct flb_config *config;
     struct flb_input_collector *coll;
 
@@ -707,16 +1025,24 @@ int flb_input_collector_pause(int coll_id, struct flb_input_instance *in)
         return -1;
     }
 
+    if (coll->running == FLB_FALSE) {
+        return 0;
+    }
+
     config = in->config;
     if (coll->type == FLB_COLLECT_TIME) {
         /*
          * For a collector time, it's better to just remove the file
          * descriptor associated to the time out, when resumed a new
          * one can be created.
+         *
+         * Note: Invalidate fd_timer first in case closing a socket
+         * invokes another event.
          */
-        mk_event_timeout_destroy(config->evl, &coll->event);
-        mk_event_closesocket(coll->fd_timer);
+        fd = coll->fd_timer;
         coll->fd_timer = -1;
+        mk_event_timeout_destroy(config->evl, &coll->event);
+        mk_event_closesocket(fd);
     }
     else if (coll->type & (FLB_COLLECT_FD_SERVER | FLB_COLLECT_FD_EVENT)) {
         ret = mk_event_del(config->evl, &coll->event);
@@ -728,6 +1054,24 @@ int flb_input_collector_pause(int coll_id, struct flb_input_instance *in)
 
     coll->running = FLB_FALSE;
 
+    return 0;
+}
+
+int flb_input_collector_delete(int coll_id, struct flb_input_instance *in)
+{
+    struct flb_input_collector *coll;
+
+    coll = get_collector(coll_id, in);
+    if (!coll) {
+        return -1;
+    }
+    if (flb_input_collector_pause(coll_id, in) < 0) {
+        return -1;
+    }
+
+    mk_list_del(&coll->_head);
+    mk_list_del(&coll->_head_ins);
+    flb_free(coll);
     return 0;
 }
 
@@ -752,6 +1096,11 @@ int flb_input_collector_resume(int coll_id, struct flb_input_instance *in)
 
     config = in->config;
     event = &coll->event;
+
+    /* If data ingestion has been paused, the collector cannot resume */
+    if (config->is_ingestion_active == FLB_FALSE) {
+        return 0;
+    }
 
     if (coll->type == FLB_COLLECT_TIME) {
         event->mask = MK_EVENT_EMPTY;
@@ -794,6 +1143,12 @@ int flb_input_set_collector_socket(struct flb_input_instance *in,
     struct flb_input_collector *collector;
 
     collector = flb_malloc(sizeof(struct flb_input_collector));
+    if (!collector) {
+        flb_errno();
+        return -1;
+    }
+
+    collector->id          = collector_id(in);
     collector->type        = FLB_COLLECT_FD_SERVER;
     collector->cb_collect  = cb_new_connection;
     collector->fd_event    = fd;
@@ -806,14 +1161,14 @@ int flb_input_set_collector_socket(struct flb_input_instance *in,
     mk_list_add(&collector->_head, &config->collectors);
     mk_list_add(&collector->_head_ins, &in->collectors);
 
-    return 0;
+    return collector->id;
 }
 
 int flb_input_collector_fd(flb_pipefd_t fd, struct flb_config *config)
 {
     struct mk_list *head;
     struct flb_input_collector *collector = NULL;
-    struct flb_thread *th;
+    struct flb_input_coro *input_coro;
 
     mk_list_foreach(head, &config->collectors) {
         collector = mk_list_entry(head, struct flb_input_collector, _head);
@@ -837,12 +1192,12 @@ int flb_input_collector_fd(flb_pipefd_t fd, struct flb_config *config)
     }
 
     /* Trigger the collector callback */
-    if (collector->instance->threaded == FLB_TRUE) {
-        th = flb_input_thread_collect(collector, config);
-        if (!th) {
+    if (collector->instance->runs_in_coroutine) {
+        input_coro = flb_input_coro_collect(collector, config);
+        if (!input_coro) {
             return -1;
         }
-        flb_thread_resume(th);
+        flb_input_coro_resume(input_coro);
     }
     else {
         collector->cb_collect(collector->instance, config,

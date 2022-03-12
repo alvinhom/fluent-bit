@@ -2,8 +2,7 @@
 
 /*  Fluent Bit
  *  ==========
- *  Copyright (C) 2019      The Fluent Bit Authors
- *  Copyright (C) 2015-2018 Treasure Data Inc.
+ *  Copyright (C) 2015-2022 The Fluent Bit Authors
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -36,10 +35,11 @@
 struct flb_hash_entry {
     time_t created;
     uint64_t hits;
+    uint64_t hash;
     char *key;
     size_t key_len;
-    char *val;
-    size_t val_size;
+    void *val;
+    ssize_t val_size;
     struct flb_hash_table *table; /* link to parent flb_hash_table */
     struct mk_list _head;         /* link to flb_hash_table->chains */
     struct mk_list _head_parent;  /* link to flb_hash->entries */
@@ -54,23 +54,34 @@ struct flb_hash {
     int evict_mode;
     int max_entries;
     int total_count;
+    int cache_ttl;
     size_t size;
     struct mk_list entries;
     struct flb_hash_table *table;
 };
 
 struct flb_hash *flb_hash_create(int evict_mode, size_t size, int max_entries);
+struct flb_hash *flb_hash_create_with_ttl(int cache_ttl, int evict_mode, 
+                                          size_t size, int max_entries);
 void flb_hash_destroy(struct flb_hash *ht);
 
 int flb_hash_add(struct flb_hash *ht,
                  const char *key, int key_len,
-                 const char *val, size_t val_size);
+                 void *val, ssize_t val_size);
 int flb_hash_get(struct flb_hash *ht,
                  const char *key, int key_len,
-                 const char **out_buf, size_t *out_size);
+                 void **out_buf, size_t *out_size);
+
+int flb_hash_exists(struct flb_hash *ht, uint64_t hash);
 int flb_hash_get_by_id(struct flb_hash *ht, int id,
                        const char *key,
                        const char **out_buf, size_t *out_size);
+
+void *flb_hash_get_ptr(struct flb_hash *ht, const char *key, int key_len);
+
 int flb_hash_del(struct flb_hash *ht, const char *key);
+
+int flb_hash_del_ptr(struct flb_hash *ht, const char *key, int key_len,
+                     void *ptr);
 
 #endif

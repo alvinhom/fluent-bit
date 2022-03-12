@@ -12,7 +12,11 @@
 #include <string.h>
 #include <stdint.h>
 
-#ifndef IOS
+#if defined(HAVE_POSIX_MEMALIGN_IN_STDLIB)
+/* stdlib is already included */
+#elif defined(HAVE_POSIX_MEMALIGN_IN_PTHREAD_NP)
+#include <malloc_np.h>
+#else
 #include <malloc.h>
 #endif
 
@@ -24,6 +28,7 @@ static thread_local uint64_t co_active_buffer[64];
 static thread_local cothread_t co_active_handle;
 
 asm (
+      ".text\n"
       ".globl co_switch_aarch64\n"
       ".globl _co_switch_aarch64\n"
       "co_switch_aarch64:\n"
@@ -54,6 +59,7 @@ asm (
       "  ldp x16, x17, [x0, #160]\n"
       "  mov sp, x16\n"
       "  br x17\n"
+      ".previous\n"
     );
 
 /* ASM */

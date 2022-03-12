@@ -2,8 +2,7 @@
 
 /*  Fluent Bit
  *  ==========
- *  Copyright (C) 2019      The Fluent Bit Authors
- *  Copyright (C) 2015-2018 Treasure Data Inc.
+ *  Copyright (C) 2015-2022 The Fluent Bit Authors
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -30,15 +29,13 @@
 #include <stdlib.h>
 #include <stddef.h>
 
-#include <onigmo.h>
-
 struct flb_regex {
-    OnigRegex regex;
+    void *regex;
 };
 
 struct flb_regex_search {
     int last_pos;
-    OnigRegion *region;
+    void *region;
     const char *str;
     void (*cb_match) (const char *,          /* name  */
                       const char *, size_t,  /* value */
@@ -50,12 +47,20 @@ int flb_regex_init();
 struct flb_regex *flb_regex_create(const char *pattern);
 ssize_t flb_regex_do(struct flb_regex *r, const char *str, size_t slen,
                      struct flb_regex_search *result);
+
+int flb_regex_match(struct flb_regex *r, unsigned char *str, size_t slen);
+
 int flb_regex_parse(struct flb_regex *r, struct flb_regex_search *result,
                     void (*cb_match) (const char *,          /* name  */
                                       const char *, size_t,  /* value */
                                       void *),                  /* caller data */
                     void *data);
 int flb_regex_destroy(struct flb_regex *r);
+int flb_regex_results_get(struct flb_regex_search *result, int i,
+                          ptrdiff_t *start, ptrdiff_t *end);
+void flb_regex_results_release(struct flb_regex_search *result);
+int flb_regex_results_size(struct flb_regex_search *result);
+
 void flb_regex_exit();
 
 #endif

@@ -2,8 +2,7 @@
 
 /*  Fluent Bit
  *  ==========
- *  Copyright (C) 2019      The Fluent Bit Authors
- *  Copyright (C) 2015-2018 Treasure Data Inc.
+ *  Copyright (C) 2015-2022 The Fluent Bit Authors
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -23,6 +22,7 @@
 
 #include <fluent-bit/flb_info.h>
 #include <fluent-bit/flb_sds.h>
+#include <fluent-bit/flb_time.h>
 #include <fluent-bit/stream_processor/flb_sp.h>
 #include <fluent-bit/stream_processor/flb_sp_window.h>
 
@@ -33,6 +33,10 @@
 #define FLB_SP_COUNT     3
 #define FLB_SP_MIN       4
 #define FLB_SP_MAX       5
+#define FLB_SP_FORECAST  6
+
+/* Update this whenever a new aggregate function is added */
+#define AGGREGATE_FUNCTIONS    6
 
 /* Date time functions */
 #define FLB_SP_NOW             10
@@ -47,12 +51,18 @@
 #define FLB_SP_ERROR        -1
 
 /* Command type */
-#define FLB_SP_SELECT        0
-#define FLB_SP_CREATE_STREAM 1
+#define FLB_SP_SELECT          0
+#define FLB_SP_CREATE_STREAM   1
+#define FLB_SP_CREATE_SNAPSHOT 2
+#define FLB_SP_FLUSH_SNAPSHOT  3
 
 /* Source type */
 #define FLB_SP_STREAM    0
 #define FLB_SP_TAG       1
+
+/* Parameter type */
+#define FLB_SP_KEY    0
+#define FLB_SP_VAL    1
 
 /* Expression type */
 enum Expressions {
@@ -62,7 +72,9 @@ enum Expressions {
     FLB_EXP_INT,
     FLB_EXP_FLOAT,
     FLB_EXP_STRING,
-    FLB_EXP_NULL
+    FLB_EXP_NULL,
+    FLB_EXP_FUNC,
+    FLB_EXP_PARAM,
 };
 
 /* Logical operation */
@@ -91,6 +103,9 @@ enum Operations {
 struct flb_sp_cmd_gb_key {
     flb_sds_t name;           /* key name */
     struct mk_list _head;     /* Link to flb_sp_cmd->gb_keys */
+    int id;                   /* Position */
+    void *gb_nums;
+    struct mk_list *subkeys;  /* sub-keys selection */
 };
 
 /* Property (key/value) */
@@ -102,17 +117,23 @@ struct flb_sp_cmd_prop {
 
 /* Key selection */
 struct flb_sp_cmd_key {
-    int aggr_func;            /* Aggregation function */
-    int time_func;            /* Time function */
-    int record_func;          /* Record function */
-    flb_sds_t name;           /* Key name */
-    flb_sds_t alias;          /* Key output alias */
-    struct mk_list _head;     /* Link to flb_sp_cmd->keys */
+    int aggr_func;             /* Aggregation function */
+    int time_func;             /* Time function */
+    int record_func;           /* Record function */
+    flb_sds_t name;            /* Parent Key name */
+    flb_sds_t alias;           /* Key output alias (key AS alias) */
+    void *gb_key;              /* Key name reference to gb_key */
+    // TODO: make it a general union type (or array of values)
+    int constant;              /* constant parameter value
+                                  (used specifically for timeseries_forecast) */
+    struct mk_list *subkeys;   /* sub-keys selection */
+    struct mk_list _head;      /* Link to flb_sp_cmd->keys */
 };
 
 struct flb_sp_window {
     int type;
     time_t size;
+    time_t advance_by;
 };
 
 struct flb_sp_cmd {
@@ -133,9 +154,10 @@ struct flb_sp_cmd {
     struct flb_sp_window window;   /* WINDOW window in select statement */
 
     struct mk_list gb_keys;        /* list head of group-by record fields */
+    char *alias;
 
     /*
-     * When parsing a SQL statement that have conditionals keys with sub-keys
+     * When parsing a SQL statement that have references to keys with sub-keys
      * like record['a']['b']['c'], the following 'tmp_subkeys' list will hold
      * a list of the discovered sub-keys (linked list).
      *
@@ -144,6 +166,9 @@ struct flb_sp_cmd {
      * field is re-created again as an empty list.
      */
     struct mk_list *tmp_subkeys;
+
+    /* Limit on the number of records returning */
+    int limit;
 
     /* Source of data */
     int source_type;               /* FLB_SP_STREAM or FLB_SP_TAG */
@@ -178,6 +203,16 @@ struct flb_exp_key {
     struct mk_list _head;
     flb_sds_t name;
     struct mk_list *subkeys;
+    int func;
+};
+
+struct flb_exp_func {
+    int type;
+    struct mk_list _head;
+    flb_sds_t name;
+    struct flb_exp_val *(*cb_func) (const char *, int,
+                                    struct flb_time *, struct flb_exp_val *);
+    struct flb_exp *param;
 };
 
 struct flb_exp_val {
@@ -186,24 +221,40 @@ struct flb_exp_val {
     sp_val val;
 };
 
+/* Represent any value object */
+struct flb_sp_value {
+    int type;
+    msgpack_object o;
+    sp_val val;
+};
+
+struct flb_exp_param {
+    int type;
+    struct mk_list _head;
+    struct flb_exp *param;
+};
+
 struct flb_sp_cmd *flb_sp_cmd_create(const char *sql);
 void flb_sp_cmd_destroy(struct flb_sp_cmd *cmd);
 
 /* Stream */
 int flb_sp_cmd_stream_new(struct flb_sp_cmd *cmd, const char *stream_name);
+int flb_sp_cmd_snapshot_new(struct flb_sp_cmd *cmd, const char *snapshot_name);
+int flb_sp_cmd_snapshot_flush_new(struct flb_sp_cmd *cmd, const char *snapshot_name);
 int flb_sp_cmd_stream_prop_add(struct flb_sp_cmd *cmd, const char *key, const char *val);
 void flb_sp_cmd_stream_prop_del(struct flb_sp_cmd_prop *prop);
 const char *flb_sp_cmd_stream_prop_get(struct flb_sp_cmd *cmd, const char *key);
 
 /* Selection keys */
-int flb_sp_cmd_key_add(struct flb_sp_cmd *cmd, int func,
-                       const char *key_name, const char *key_alias);
+int flb_sp_cmd_key_add(struct flb_sp_cmd *cmd, int func, const char *key_name);
 void flb_sp_cmd_key_del(struct flb_sp_cmd_key *key);
+void flb_sp_cmd_alias_add(struct flb_sp_cmd *cmd, const char *key_alias);
 int flb_sp_cmd_source(struct flb_sp_cmd *cmd, int type, const char *source);
 void flb_sp_cmd_dump(struct flb_sp_cmd *cmd);
 
-void flb_sp_cmd_window(struct flb_sp_cmd *cmd,
-                       int window_type, int size, int time_unit);
+int flb_sp_cmd_window(struct flb_sp_cmd *cmd, int window_type,
+                      int size, int time_unit,
+                      int advance_by_size, int advance_by_time_unit);
 
 void flb_sp_cmd_condition_add(struct flb_sp_cmd *cmd, struct flb_exp *e);
 struct flb_exp *flb_sp_cmd_operation(struct flb_sp_cmd *cmd,
@@ -221,10 +272,17 @@ struct flb_exp *flb_sp_cmd_condition_string(struct flb_sp_cmd *cmd,
 struct flb_exp *flb_sp_cmd_condition_boolean(struct flb_sp_cmd *cmd,
                                              bool boolean);
 struct flb_exp *flb_sp_cmd_condition_null(struct flb_sp_cmd *cmd);
+struct flb_exp *flb_sp_record_function_add(struct flb_sp_cmd *cmd,
+                                           char *name, struct flb_exp *param);
 
 void flb_sp_cmd_condition_del(struct flb_sp_cmd *cmd);
 
 int flb_sp_cmd_gb_key_add(struct flb_sp_cmd *cmd, const char *key);
 void flb_sp_cmd_gb_key_del(struct flb_sp_cmd_gb_key *key);
+
+void flb_sp_cmd_limit_add(struct flb_sp_cmd *cmd, int limit);
+
+int flb_sp_cmd_timeseries_forecast(struct flb_sp_cmd *cmd, int func,
+                                   const char *key_name, int seconds);
 
 #endif

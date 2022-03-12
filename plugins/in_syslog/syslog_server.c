@@ -2,8 +2,7 @@
 
 /*  Fluent Bit
  *  ==========
- *  Copyright (C) 2019      The Fluent Bit Authors
- *  Copyright (C) 2015-2018 Treasure Data Inc.
+ *  Copyright (C) 2015-2022 The Fluent Bit Authors
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -25,6 +24,7 @@
 #include <fluent-bit/flb_network.h>
 
 #include <unistd.h>
+#include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <sys/un.h>
@@ -60,6 +60,14 @@ static int syslog_server_unix_create(struct flb_syslog *ctx)
     address_length = sizeof(address.sun_family) + len + 1;
     if (bind(fd, (struct sockaddr *) &address, address_length) != 0) {
         flb_errno();
+        close(fd);
+        return -1;
+    }
+
+    if (chmod(address.sun_path, ctx->unix_perm)) {
+        flb_errno();
+        flb_error("[in_syslog] cannot set permission on '%s' to %04o",
+                  address.sun_path, ctx->unix_perm);
         close(fd);
         return -1;
     }
@@ -140,7 +148,6 @@ int syslog_server_destroy(struct flb_syslog *ctx)
         }
     }
     else {
-        flb_free(ctx->listen);
         flb_free(ctx->port);
     }
 
