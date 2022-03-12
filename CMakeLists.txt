@@ -22,6 +22,8 @@ else()
   set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -D__FILENAME__=__FILE__")
 endif()
 
+set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fcommon -fno-lto")
+
 include(GNUInstallDirs)
 include(ExternalProject)
 include(cmake/FindJournald.cmake)
